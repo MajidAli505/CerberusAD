@@ -1,7 +1,7 @@
 # paths.py - Privilege Reachability
-# Kaun sa account Domain Admin tak pohnch sakta hai, kis permission se,
-# us ka asar kya hai, aur usay band kese karna hai.
-# Chalana: python3 paths.py   (pehle collector.py chala ho)
+# Which account can reach Domain Admin, through which permission,
+# what its impact is, and how to close it.
+# Run: python3 paths.py   (collector.py must have been run first)
 import json
 import re
 from collections import deque
@@ -21,7 +21,7 @@ WRITE_DACL     = 0x00040000
 WRITE_OWNER    = 0x00080000
 DANGER = GENERIC_ALL | GENERIC_WRITE | WRITE_DACL | WRITE_OWNER
 
-DOMAIN     = "DOMAIN"      # khaas node: poora domain
+DOMAIN     = "DOMAIN"      # special node: the entire domain
 EVERYONE   = "S-1-1-0"
 AUTH_USERS = "S-1-5-11"
 
@@ -52,11 +52,11 @@ def find_reachability(d):
     def label(node):
         return name_of.get(node, node)
 
-    # Manzilain: Domain / Enterprise / Schema Admins + DOMAIN node
+    # Targets: Domain / Enterprise / Schema Admins + DOMAIN node
     targets = {dn for dn, g in groups.items() if rid(g.get("sid")) in (512, 518, 519)}
     targets.add(DOMAIN)
 
-    # Bharosay walay trustees: in ke haq khatra nahi (admins khud, SYSTEM, DCs)
+    # Trusted trustees: their rights are not a risk (admins themselves, SYSTEM, DCs)
     legit = {"S-1-5-18", "S-1-3-0", "S-1-5-10", "S-1-5-9", "S-1-5-32-544"}
     for dn, g in groups.items():
         if rid(g.get("sid")) in (512, 518, 519, 516, 544) and g.get("sid"):
@@ -115,7 +115,7 @@ def find_reachability(d):
                     "Membership gives this account every right of that group.",
                     "Remove the account from this group if the access is not required.")
 
-    # --- 2) User objects par control rights ---
+    # --- 2) Control rights on user objects ---
     for uname, aces in d.get("user_acls", {}).items():
         tdn = next((dn for dn, u in users.items() if u["name"] == uname), None)
         if not tdn:
@@ -137,7 +137,7 @@ def find_reachability(d):
                     "Full control means the holder can change the account's settings and take control of it.",
                     "Remove this access entry, or reduce it to the minimum the holder actually needs.")
 
-    # --- 3) Group objects par control rights ---
+    # --- 3) Control rights on group objects ---
     for gname, aces in d.get("group_acls", {}).items():
         tdn = next((dn for dn, g in groups.items() if g["name"] == gname), None)
         if not tdn:
@@ -154,7 +154,7 @@ def find_reachability(d):
                     "Whoever can edit this group's membership can give its rights to any account.",
                     "Remove this access entry - group membership should only be managed by the admin team.")
 
-    # --- 4) Replication rights (domain par) ---
+    # --- 4) Replication rights (on the domain) ---
     rights = {}
     for ace in d.get("domain_acl", []):
         sid  = ace.get("sid")
@@ -213,7 +213,7 @@ def find_reachability(d):
                     "This GPO's settings apply at that scope. If it is linked at the domain root or the Domain Controllers OU, a harmful change reaches the Domain Controllers themselves.",
                     "Limit who can edit this GPO to the admin team only.")
 
-    # --- 6) AD CS: published ESC1 template par enrollment ---
+    # --- 6) AD CS: enrollment on a published ESC1 template ---
     published = set()
     for ca in d.get("cas", []):
         published.update(ca.get("published", []))
@@ -237,7 +237,7 @@ def find_reachability(d):
                     "This template lets the person enrolling ask for a certificate in another identity's name. Such a certificate can then be used to sign in as that identity - including an administrator.",
                     "Restrict enrollment on this template to approved groups, or turn off 'supply subject name' / require manager approval.")
 
-    # --- Pehle se privileged: sirf membership se manzil tak ---
+    # --- Already privileged: reaches a target through membership alone ---
     rev_member = {}
     for a, lst in edges.items():
         for (b, kind, _t, _r, _f) in lst:
@@ -253,7 +253,7 @@ def find_reachability(d):
                 dq.append(a)
     privileged_users = {dn for dn in users if dn in member_only}
 
-    # --- Reverse BFS: har node se manzil tak faasla ---
+    # --- Reverse BFS: distance from every node to a target ---
     radj = {}
     for a, lst in edges.items():
         for (b, kind, t, r, f) in lst:
@@ -300,7 +300,7 @@ if __name__ == "__main__":
         data = json.load(f)
     already, reaching = find_reachability(data)
 
-    print("=== ALREADY PRIVILEGED (seedha Domain Admin level) ===")
+    print("=== ALREADY PRIVILEGED (direct Domain Admin level) ===")
     print(f"Count: {len(already)}")
     for n in already:
         print(" -", n)

@@ -17,7 +17,7 @@ psos = data.get("psos", [])
 
 
 
-# ---------- chhote helpers ----------
+# ---------- small helpers ----------
 def group_by_name(d, name):
     for g in d["groups"]:
         if g["name"].lower() == name.lower():
@@ -60,11 +60,11 @@ def list_group(rid):
     return [dn_to_name(m) for m in members_of_rid(rid)]
 
 def replication_trustees(d):
-    # Domain root ki ACL se har trustee ke replication haq ikatthe karna
+    # Collect each trustee's replication rights from the domain root ACL
     rights = {}
     for ace in d.get("domain_acl", []):
         s = rights.setdefault(ace["sid"], set())
-        if ace["mask"] & 0x10000000:   # GENERIC_ALL — sab haq, replication bhi
+        if ace["mask"] & 0x10000000:   # GENERIC_ALL — all rights, including replication
             s.update([REPL_GET_CHANGES, REPL_GET_CHANGES_ALL])
         for g in ace.get("object_types", []):
             if g in (REPL_GET_CHANGES, REPL_GET_CHANGES_ALL):
@@ -75,7 +75,7 @@ def replication_trustees(d):
 
 # ---------- CHECKS ----------
 def reg_val(entry, key):
-    # GptTmpl.inf ki [Registry Values] line "4,1" jaisi hoti hai — aakhri hisa asal value hai
+    # A [Registry Values] line in GptTmpl.inf looks like "4,1" — the last part is the actual value
     v = entry.get("sec", {}).get("registry values", {}).get(key)
     return v.split(",")[-1].strip() if v else None
 
@@ -120,7 +120,7 @@ def check_transitive_da(d):
             else:
                 users_found.add(dn_to_name(m))
     expand(group_by_rid(512))
-    return [f"Kul Domain Admins (nested groups mila kar): {len(users_found)}"] + sorted(users_found)
+    return [f"Total Domain Admins (including nested groups): {len(users_found)}"] + sorted(users_found)
 
 def check_empty_ous(d):
     all_dns = ([u["dn"] for u in d["users"]] + [g["dn"] for g in d["groups"]]
@@ -177,7 +177,7 @@ def check_print_on_dc(d):
 
 def weak_enc(items):
     # enc_types: 0x3 = DES, 0x4 = RC4, 0x8 = AES128, 0x10 = AES256.
-    # Agar sirf DES/RC4 ijazat hai (AES bit ghayab) to kamzor hai.
+    # If only DES/RC4 is allowed (the AES bits are absent), the encryption is weak.
     out = []
     for x in items:
         v = x.get("enc_types")
@@ -222,7 +222,7 @@ def check_pwd_365(d):
     for u in d["users"]:
         days = days_ago(u["pwd_set"])
         if u["enabled"] and days is not None and days > 365:
-            out.append(f"{u['name']} ({days} din purana)")
+            out.append(f"{u['name']} ({days} days old)")
     return out
 
 def check_sidhistory_priv(d):
@@ -230,8 +230,8 @@ def check_sidhistory_priv(d):
             if is_priv(u) and u.get("sid_history")]
 
 def check_not_protected_users(d):
-    # Domain Admins ke wo members jo 'Protected Users' group mein nahi —
-    # Protected Users mein honay se account delegate bhi nahi ho sakta aur NTLM se bachao milta hai
+    # Domain Admins members who are not in the 'Protected Users' group —
+    # Membership in Protected Users prevents delegation and provides protection from NTLM
     pu = group_by_name(d, "Protected Users")
     pu_dn = pu["dn"] if pu else None
     da = group_by_rid(512)
@@ -277,7 +277,7 @@ def check_latent_clientauth(d):
             and "1.3.6.1.5.5.7.3.2" in t.get("eku", [])]
 
 def check_enforced_links(d):
-    # gPLink ke aakhir mein ;0 ;1 ;2 ;3 hota hai — 2 ya 3 ka matlab link ENFORCED hai
+    # A gPLink ends in ;0, ;1, ;2, or ;3 — 2 or 3 means the link is ENFORCED
     links = []
     if d.get("domain", {}).get("gplink"):
         links.append(d["domain"]["gplink"])
@@ -310,7 +310,7 @@ def name_by_sid(d):
     return m
 
 def legit_acl_sids(d):
-    # Jin ka domain root par haq hona DESIGN hai — inhe finding nahi kehna
+    # Principals that are supposed to have rights on the domain root by DESIGN — do not treat them as findings
     legit = {"S-1-5-18", "S-1-3-0"}   # SYSTEM
     for g in d["groups"]:
         if g["name"] in ("Domain Controllers", "Enterprise Domain Controllers",
@@ -327,7 +327,7 @@ def check_dcsync(d):
     rights = {}
     for ace in d.get("domain_acl", []):
         s = rights.setdefault(ace["sid"], set())
-        if ace["mask"] & 0x10000000:   # GENERIC_ALL — sab kuch, replication bhi
+        if ace["mask"] & 0x10000000:   # GENERIC_ALL — everything, including replication
             s.update([REPL_GET_CHANGES, REPL_GET_CHANGES_ALL])
         for g in ace.get("object_types", []):
             if g in (REPL_GET_CHANGES, REPL_GET_CHANGES_ALL):
@@ -350,24 +350,24 @@ def dangerous_trustees(d, acl_key):
 def check_laps(d):
     if d.get("laps_schema"):
         return []
-    return ["LAPS ka koi nishan nahi — local admin passwords manage nahi hote"]
+    return ["No sign of LAPS — local admin passwords are not managed"]
 
 
 def check_fsmo_single(d):
     srvs = {s for s in d.get("fsmo", {}).values() if s}
     if len(srvs) == 1 and len(d.get("fsmo", {})) >= 2:
-        return [f"Saare FSMO roles ek hi DC par hain: {list(srvs)[0]}"]
+        return [f"All FSMO roles are on a single DC: {list(srvs)[0]}"]
     return []
 
 def check_recycle_bin(d):
     if d.get("recycle_bin_enabled"):
         return []
-    return ["AD Recycle Bin enabled nahi hai — deleted object wapas lana bohat mushkil hoga"]
+    return ["AD Recycle Bin is not enabled — recovering a deleted object will be very difficult"]
 
 def check_tombstone(d):
     t = d.get("tombstone_days")
     if t is not None and t < 180:
-        return [f"Tombstone lifetime sirf {t} din hai (180 hona chahiye)"]
+        return [f"Tombstone lifetime is only {t} days (it should be 180)"]
     return []
 
 def check_dc_outside_ou(d):
@@ -386,7 +386,7 @@ def check_spn_on_privileged(d):
 
 
 def check_duplicate_spns(d):
-    # Ek hi SPN do accounts par = Kerberos toot jata hai, aur ye aksar ghalti se hota hai
+    # The same SPN on two accounts breaks Kerberos, and this often happens by mistake
     seen = {}
     for u in d["users"]:
         for s in u["spns"]:
@@ -394,7 +394,7 @@ def check_duplicate_spns(d):
     return [f"{spn} -> {', '.join(names)}" for spn, names in seen.items() if len(names) > 1]
 
 def check_sid_history(d):
-    # sIDHistory = purane domain ki pehchan sath liye phirna — migration ki majboori ya chhupa hua darwaza
+    # sIDHistory = carrying an identity from an old domain — a migration necessity or a hidden doorway
     return [u["name"] for u in d["users"] if len(u.get("sid_history", [])) > 0]
 
 def check_multiple_spns(d):
@@ -408,7 +408,7 @@ def check_nested_in_any_priv(d):
             continue
         for m in g["members"]:
             if m in group_dns:
-                bad.append(f'{g["name"]} ke andar group: {dn_to_name(m)}')
+                bad.append(f'{g["name"]} contains nested group: {dn_to_name(m)}')
     return bad
 
 def check_empty_priv_groups(d):
@@ -430,7 +430,7 @@ def check_duplicate_upns(d):
     return [f"{upn} -> {', '.join(names)}" for upn, names in seen.items() if len(names) > 1]
 
 def check_local_upn_suffix(d):
-    # .local wala UPN cloud se sync nahi ho sakta — hybrid ki tayyari mein rukawat
+    # A UPN with a .local suffix cannot sync to the cloud — an obstacle when preparing for hybrid identity
     return [f'{u["name"]} ({u["upn"]})' for u in d["users"]
             if u.get("upn") and u["upn"].lower().endswith(".local")]
 
@@ -463,7 +463,7 @@ def published_names(d):
     return names
 
 def check_esc1_published(d):
-    # Asal ESC1: khatarnak flags AUR CA par published — ye foran tawajjo wali hai
+    # True ESC1: dangerous flags AND published on a CA — this needs immediate attention
     pub = published_names(d)
     return [t["name"] for t in d.get("cert_templates", [])
             if t["name"] in pub and (t["name_flag"] & 1)
@@ -476,13 +476,13 @@ def check_published_no_approval(d):
             and t["ra_signature"] == 0 and has_client_auth(t)]
 
 def check_ca_on_dc(d):
-    # CA ka DC par hona — do sab se ahem roles ek hi machine par
+    # A CA installed on a DC — two critical roles on the same machine
     dc_names = {c["name"].replace("$", "").lower() for c in d["computers"] if c["is_dc"]}
     bad = []
     for ca in d.get("cas", []):
         host = (ca.get("host") or "").split(".")[0].lower()
         if host in dc_names:
-            bad.append(f'{ca["name"]} DC ({ca["host"]}) par installed hai')
+            bad.append(f'{ca["name"]} is installed on DC ({ca["host"]})')
     return bad
 
 def check_msol_accounts(d):
@@ -493,7 +493,7 @@ def check_sso_account(d):
             if c["name"].lower().startswith("azureadssoacc")]
 
 def check_synced_privileged(d):
-    # Privileged account ka cloud se jura hona — on-prem hack = cloud bhi gaya
+    # A privileged account linked to the cloud — an on-premises compromise also compromises the cloud
     return [u["name"] for u in d["users"] if is_priv(u) and u.get("synced")]
 
 def check_weak_pso(d):
@@ -511,8 +511,8 @@ def has_client_auth(t):
     return CLIENT_AUTH in t["eku"] or ANY_PURPOSE in t["eku"] or len(t["eku"]) == 0
 
 def check_esc1(d):
-    # Template maangne walay ko apni marzi ka naam likhne de + koi approval/signature nahi + login wala maqsad
-    # = koi bhi khud ko Administrator likh kar certificate le sakta hai
+    # Lets the requester supply any name + no approval/signature + a logon purpose
+    # = anyone can obtain a certificate by claiming to be Administrator
     return [t["name"] for t in d.get("cert_templates", [])
             if (t["name_flag"] & 1) and t["ra_signature"] == 0 and has_client_auth(t)]
 
@@ -529,7 +529,7 @@ def check_supplies_subject(d):
             if t["name_flag"] & 1]
 
 def check_no_approval(d):
-    # enroll_flag ka bit 0x2 ON ho to manager approval chahiye; OFF + signature 0 = seedha certificate milta hai
+    # If bit 0x2 of enroll_flag is ON, manager approval is required; if OFF and the signature count is 0, a certificate is issued directly
     return [t["name"] for t in d.get("cert_templates", [])
             if not (t["enroll_flag"] & 0x2) and t["ra_signature"] == 0 and has_client_auth(t)]
 
@@ -554,7 +554,7 @@ def check_functional_level(d):
     fl = d["domain"].get("functional_level", 0)
     names = {0: "2000", 2: "2003", 3: "2008", 4: "2008 R2", 5: "2012", 6: "2012 R2", 7: "2016"}
     if fl < 7:
-        return [f"Domain functional level {names.get(fl, fl)} hai — 2016 hona chahiye"]
+        return [f"Domain functional level {names.get(fl, fl)} — it should be 2016"]
     return []
 
 def check_default_containers(d):
@@ -562,13 +562,13 @@ def check_default_containers(d):
     n_users = sum(1 for u in d["users"] if u.get("dn") and ",CN=Users," in u["dn"])
     n_comps = sum(1 for c in d["computers"] if c.get("dn") and ",CN=Computers," in c["dn"])
     if n_users:
-        bad.append(f"{n_users} users default 'Users' container mein hain — sahi OU structure nahi bana")
+        bad.append(f"{n_users} users are in the default 'Users' container — no proper OU structure has been created")
     if n_comps:
-        bad.append(f"{n_comps} computers default 'Computers' container mein hain")
+        bad.append(f"{n_comps} computers are in the default 'Computers' container")
     return bad
 
 def check_unlinked_gpos(d):
-    # GPO ka GUID us ke DN mein hota hai; link shuda GPO ka GUID kisi na kisi gPLink mein milta hai
+    # A GPO's GUID is in its DN; a linked GPO's GUID appears in some gPLink
     links = (d["domain"].get("gp_link") or "") + " ".join(o.get("gp_link") or "" for o in d.get("ous", []))
     bad = []
     for g in d.get("gpos", []):
@@ -580,7 +580,7 @@ def check_unlinked_gpos(d):
     return bad
 
 def check_trust_sid_filtering(d):
-    # trustAttributes ka bit 0x4 ON = SID filtering on hai; OFF matlab doosre domain ke nakli SID bhi chal sakte hain
+    # If bit 0x4 of trustAttributes is ON, SID filtering is on; if OFF, forged SIDs from the other domain may also be accepted
     return [t["partner"] for t in d.get("trusts", []) if not (t["attributes"] & 0x4)]
 
 def check_trust_bidirectional(d):
@@ -595,18 +595,18 @@ def priv_group_count(u):
     return n
 
 def check_multi_priv(d):
-    # Ek account ka kayi privileged groups mein hona — ek password, kayi darwazay
-    return [f'{u["name"]} ({priv_group_count(u)} privileged groups mein hai)'
+    # One account in multiple privileged groups — one password, multiple doors
+    return [f'{u["name"]} ({priv_group_count(u)} privileged groups)'
             for u in d["users"] if priv_group_count(u) >= 2]
 
 def check_da_never_logon(d):
-    # Domain Admin jo kabhi logon hi nahi hua — kis ke liye rakha hai?
+    # A Domain Admin who has never logged on — why is the account kept?
     da = set(members_of_rid(512))
     return [u["name"] for u in d["users"]
             if u.get("dn") in da and u["last_logon"] in (None, "None")]
 
 def check_asrep_priv(d):
-    # AS-REP roastable AUR privileged — sab se khatarnak combination
+    # AS-REP roastable AND privileged — the most dangerous combination
     return [u["name"] for u in d["users"]
             if u["enabled"] and is_priv(u) and (u["uac"] & 0x400000)]
 
@@ -615,14 +615,14 @@ def check_kerb_never_expires(d):
             if u["enabled"] and len(u["spns"]) > 0 and (u["uac"] & 0x10000)]
 
 def check_pwd_180(d):
-    return [f'{u["name"]} ({days_ago(u["pwd_set"])} din purana)'
+    return [f'{u["name"]} ({days_ago(u["pwd_set"])} days old)'
             for u in d["users"]
             if u["enabled"] and days_ago(u["pwd_set"]) is not None
             and days_ago(u["pwd_set"]) > 180]
 
 def check_dormant_priv(d):
-    # Privileged account jo 90 din se soya hua hai — nazar nahi rehti, taaqat rehti hai
-    return [f'{u["name"]} ({days_ago(u["last_logon"])} din se ghayab)'
+    # A privileged account dormant for 90 days — it receives no attention, but retains its power
+    return [f'{u["name"]} ({days_ago(u["last_logon"])} days absent)'
             for u in d["users"]
             if is_priv(u) and days_ago(u["last_logon"]) is not None
             and days_ago(u["last_logon"]) > 90]
@@ -639,7 +639,7 @@ def check_stale_computers_180(d):
 
 
 def check_unconstrained_computers(d):
-    # DC ke ilawa kisi machine par unconstrained delegation = jo user wahan login kare, us ki pehchan churayi ja sakti hai
+    # Unconstrained delegation on a machine other than a DC = the identity of any user who logs on there can be stolen
     return [c["name"] for c in d["computers"]
             if not c["is_dc"] and (c.get("uac", 0) & 0x80000)]
 
@@ -654,7 +654,7 @@ def check_constrained_delegation(d):
     return bad
 
 def check_protocol_transition(d):
-    # TRUSTED_TO_AUTH = ye account kisi ke bhi naam par ticket bana sakta hai, bina us ke password ke
+    # TRUSTED_TO_AUTH = this account can create a ticket in anyone's name, without that person's password
     bad = [u["name"] for u in d["users"] if u["enabled"] and (u["uac"] & 0x1000000)]
     bad += [c["name"] for c in d["computers"] if not c["is_dc"] and (c.get("uac", 0) & 0x1000000)]
     return bad
@@ -664,7 +664,7 @@ def check_delegation_on_privileged(d):
             if is_priv(u) and (u.get("delegate_to") or (u["uac"] & 0x80000))]
 
 def check_computer_old_passwords(d):
-    return [f'{c["name"]} ({days_ago(c["pwd_set"])} din purana)'
+    return [f'{c["name"]} ({days_ago(c["pwd_set"])} days old)'
             for c in d["computers"]
             if days_ago(c.get("pwd_set")) is not None and days_ago(c["pwd_set"]) > 90]
 
@@ -683,13 +683,13 @@ def check_dc_list(d):
 def check_lockout_duration(d):
     mins = d["domain"].get("lockout_duration_min")
     if mins is not None and mins < 30:
-        return [f"Lockout duration sirf {mins} minute hai (30+ hona chahiye)"]
+        return [f"Lockout duration is only {mins} minutes (it should be 30+)"]
     return []
 
 def check_max_pwd_age(d):
     age = d["domain"].get("max_pwd_age_days")
     if age is None or age == 0 or age > 365:
-        return [f"Maximum password age {age} hai — passwords bohat arsay chalte hain"]
+        return [f"Maximum password age {age} — passwords remain valid for a very long time"]
     return []
 
 
@@ -698,29 +698,29 @@ def check_priv_never_expires(d):
             if u["enabled"] and is_priv(u) and (u["uac"] & 0x10000)]
 
 def check_priv_old_password(d):
-    return [f'{u["name"]} ({days_ago(u["pwd_set"])} din purana)'
+    return [f'{u["name"]} ({days_ago(u["pwd_set"])} days old)'
             for u in d["users"]
             if u["enabled"] and is_priv(u)
             and days_ago(u["pwd_set"]) is not None and days_ago(u["pwd_set"]) > 90]
 
 def check_kerb_old_password(d):
-    # Kerberoastable + purana password = crack karne ke liye zyada waqt mil chuka hai
+    # Kerberoastable + an old password = more time has been available to crack it
     return [u["name"] for u in d["users"]
             if u["enabled"] and len(u["spns"]) > 0
             and days_ago(u["pwd_set"]) is not None and days_ago(u["pwd_set"]) > 90]
 
 def check_pwd_not_required(d):
-    # Is account ko password ki zaroorat hi nahi — khali password se login mumkin
+    # This account does not require a password at all — logon with a blank password is possible
     return [u["name"] for u in d["users"]
             if u["enabled"] and (u["uac"] & 0x20)]
 
 def check_reversible_encryption(d):
-    # Password is tarah save hota hai ke wapas asal shakal mein nikala ja sake
+    # The password is stored in a way that lets it be recovered in its original form
     return [u["name"] for u in d["users"]
             if u["enabled"] and (u["uac"] & 0x80)]
 
 def check_des_only(d):
-    # Sirf DES encryption — sab se kamzor, purani technology
+    # DES encryption only — the weakest, oldest technology
     return [u["name"] for u in d["users"]
             if u["enabled"] and (u["uac"] & 0x200000)]
 
@@ -729,7 +729,7 @@ def check_never_logged_on(d):
             if u["enabled"] and u["last_logon"] in (None, "None")]
 
 def check_inactive_users(d):
-    return [f'{u["name"]} ({days_ago(u["last_logon"])} din se ghayab)'
+    return [f'{u["name"]} ({days_ago(u["last_logon"])} days absent)'
             for u in d["users"]
             if u["enabled"]
             and days_ago(u["last_logon"]) is not None and days_ago(u["last_logon"]) > 90]
@@ -748,47 +748,47 @@ def check_eol_os(d):
 def check_single_dc(d):
     dcs = [c for c in d["computers"] if c["is_dc"]]
     if len(dcs) == 1:
-        return ["Sirf 1 Domain Controller hai — wo band to poora domain band"]
+        return ["Only 1 Domain Controller exists — if it goes down, the whole domain goes down"]
     return []
 
 def check_machine_quota(d):
     q = d["domain"]["machine_account_quota"]
     if q > 0:
-        return [f"Machine account quota {q} hai — koi bhi aam user itni machines domain mein la sakta hai"]
+        return [f"Machine account quota {q} — any ordinary user can add that many machines to the domain"]
     return []
 
 def check_da_too_many(d):
     n = len(members_of_rid(512))
     if n > 5:
-        return [f"Domain Admins mein {n} members hain — 5 se zyada risky hai"]
+        return [f"Domain Admins has {n} members — more than 5 is risky"]
     return []
 
 def check_service_in_da(d):
-    # Service account ka Domain Admin hona = crack ho to seedha poora domain
+    # A service account that is a Domain Admin = if it is cracked, the whole domain is directly compromised
     da = set(members_of_rid(512))
     return [u["name"] for u in d["users"]
             if u.get("dn") in da and len(u["spns"]) > 0]
 
 def check_nested_in_da(d):
-    # Group ke andar group chhupana — asal members nazar nahi aate
+    # Hiding a group inside a group — the actual members are not visible
     return [dn_to_name(m) for m in members_of_rid(512) if m in group_dns]
 
 def check_admincount_orphans(d):
-    # Kabhi admin thay, group se nikal gaye, lekin admin wali hifazat (adminCount) reh gayi
+    # Former admins who left the group but kept the administrative protection (adminCount)
     priv = set()
     for rid in (512, 519, 518):
         priv.update(members_of_rid(rid))
     return [u["name"] for u in d["users"]
             if u["admin_count"] == 1 and u.get("dn") not in priv
-            and u["name"].lower() != "krbtgt"]   # krbtgt hamesha protected hota hai — usay count nahi karna
+            and u["name"].lower() != "krbtgt"]   # krbtgt is always protected — do not count it
 
 def check_never_expires(d):
-    # Password kabhi expire nahi hota — purana password hamesha ke liye zinda
+    # The password never expires — an old password remains valid forever
     return [u["name"] for u in d["users"]
             if u["enabled"] and (u["uac"] & 0x10000)]
 
 def check_old_passwords(d):
-    # 90 din se password change nahi hua
+    # The password has not changed in 90 days
     bad = []
     now = datetime.now(timezone.utc)
     for u in d["users"]:
@@ -797,79 +797,79 @@ def check_old_passwords(d):
         dt = datetime.fromisoformat(u["pwd_set"])
         age = (now - dt).days
         if age > 90:
-            bad.append(f'{u["name"]} ({age} din purana)')
+            bad.append(f'{u["name"]} ({age} days old)')
     return bad
 
 def check_guest_enabled(d):
-    # Guest account enabled hona kabhi theek nahi
+    # An enabled Guest account is never acceptable
     return [u["name"] for u in d["users"]
             if u["name"].lower() == "guest" and u["enabled"]]
 
 def check_krbtgt_age(d):
-    # krbtgt ka password purana = poore domain ke tickets ka khaata purana
+    # An old krbtgt password = the ticket store for the whole domain is old
     now = datetime.now(timezone.utc)
     for u in d["users"]:
         if u["name"].lower() == "krbtgt" and u["pwd_set"] not in (None, "None"):
             dt = datetime.fromisoformat(u["pwd_set"])
             age = (now - dt).days
             if age > 180:
-                return [f"krbtgt password {age} din purana hai"]
+                return [f"krbtgt password {age} days old"]
     return []
 
 def check_stale_computers(d):
-    # 90 din se network par nazar nahi aye — bhooli hui machines
+    # Not seen on the network for 90 days — forgotten machines
     bad = []
     now = datetime.now(timezone.utc)
     for c in d["computers"]:
         if c["last_logon"] in (None, "None"):
-            bad.append(f'{c["name"]} (kabhi logon record nahi)')
+            bad.append(f'{c["name"]} (no recorded logon)')
             continue
         dt = datetime.fromisoformat(c["last_logon"])
         age = (now - dt).days
         if age > 90:
-            bad.append(f'{c["name"]} ({age} din se ghayab)')
+            bad.append(f'{c["name"]} ({age} days absent)')
     return bad
 
 def check_weak_policy(d):
-    # Domain password policy ki kamzoriyan — ye check naam nahi, maslay wapas karta hai
+    # Weaknesses in the domain password policy — this check returns problems, not names
     dom = d["domain"]
     problems = []
     if dom["min_pwd_length"] < 14:
-        problems.append(f'Minimum password length sirf {dom["min_pwd_length"]} hai (14 hona chahiye)')
+        problems.append(f'Minimum password length is only {dom["min_pwd_length"]} (it should be 14)')
     if dom["lockout_threshold"] == 0:
-        problems.append("Account lockout threshold set hi nahi — brute force par koi rok nahi")
+        problems.append("Account lockout threshold is not set — there is no barrier to brute force")
     if dom["pwd_history_length"] < 24:
-        problems.append(f'Password history sirf {dom["pwd_history_length"]} hai (24 hona chahiye)')
+        problems.append(f'Password history is only {dom["pwd_history_length"]} (it should be 24)')
     return problems
 
 def check_unconstrained_delegation(d):
-    # Kisi aam machine ko tumhari pehchan aagay barhane ka haq — DC ke ilawa sab par khatra
+    # An ordinary machine has the right to forward your identity — a risk everywhere except DCs
     bad = []
     for c in d["computers"]:
-        pass  # computers mein uac save nahi kiya tha — neechay note parho
+        pass  # uac was not saved for computers — read the note below
     for u in d["users"]:
         if u["enabled"] and (u["uac"] & 0x80000):
             bad.append(u["name"])
     return bad
 
 def check_asrep(d):
-    # Kerberos pre-authentication band = bina password ke hash manga ja sakta hai
+    # Kerberos pre-authentication disabled = a hash can be requested without a password
     return [u["name"] for u in d["users"]
             if u["enabled"] and (u["uac"] & 0x400000)]
 
 def check_kerberoastable(d):
-    # Jin accounts par SPN laga hai, un ka password ticket se crack ho sakta hai
+    # Accounts with an SPN have passwords that can be cracked from a ticket
     return [u["name"] for u in d["users"]
             if u["enabled"] and len(u["spns"]) > 0]
 
 def check_da_members(d):
-    # Domain Admins ki list — tadaad zyada ho to bhi finding, list hamesha dikhao
+    # The Domain Admins list — always show the list, even if the count itself is a finding
     g = group_by_rid(512)
     if not g:
         return []
     return [dn_to_name(m) for m in g["members"]]
 
-# Har check ka record: (ID, naam, severity, function)
+# Har check ka record: (ID, name, severity, function)
 CHECKS = [
     ("AUTH-01", "AS-REP Roastable Accounts",        "High",   check_asrep),
     ("AUTH-02", "Kerberoastable Accounts (SPN)",     "High",   check_kerberoastable),
@@ -946,7 +946,7 @@ CHECKS = [
     ("HYB-02", "Seamless SSO Account (AZUREADSSOACC)", "Info",  check_sso_account),
     ("HYB-03", "Synced Privileged Accounts",        "High",     check_synced_privileged),
     ("HYB-04", "Sync Account in Domain Admins",     "Critical", lambda d: [u["name"] for u in d["users"] if u["name"].lower().startswith("msol_") and u.get("dn") in set(members_of_rid(512))]),
-    ("HYB-05", "SSO Account Password Age",          "Medium",   lambda d: [f'{c["name"]} ({days_ago(c.get("pwd_set"))} din purana)' for c in d["computers"] if c["name"].lower().startswith("azureadssoacc") and days_ago(c.get("pwd_set")) is not None and days_ago(c["pwd_set"]) > 90]),
+    ("HYB-05", "SSO Account Password Age",          "Medium",   lambda d: [f'{c["name"]} ({days_ago(c.get("pwd_set"))} days old)' for c in d["computers"] if c["name"].lower().startswith("azureadssoacc") and days_ago(c.get("pwd_set")) is not None and days_ago(c["pwd_set"]) > 90]),
     ("POL-09", "Fine-Grained Password Policies",   "Info",     lambda d: [p["name"] for p in d.get("psos", [])]),
     ("POL-10", "Weak PSO (Min Length < 14)",       "Medium",   check_weak_pso),
     ("AUTH-24", "SPN on Privileged Accounts",        "High",   check_spn_on_privileged),
@@ -994,9 +994,9 @@ CHECKS = [
     ("AUTH-34", "krbtgt Weak Kerberos Encryption",    "High",   lambda d: weak_enc([u for u in d["users"] if u["name"].lower() == "krbtgt"])),
     ("DS-32",   "Weak Kerberos Encryption (Computers)", "Medium", lambda d: weak_enc(d["computers"])),
     ("DS-33",   "Orphaned Trustees on Domain Root",   "Low",    check_orphan_acl),
-    ("POL-14",  "Password Complexity Not Enforced",   "High",   lambda d: ["Password complexity requirement ON nahi hai"] if d["domain"].get("pwd_properties") is not None and (d["domain"]["pwd_properties"] & 1) == 0 else []),
-    ("POL-15",  "Password History Too Low (<24)",     "Low",    lambda d: [f"Password history sirf {d['domain']['pwd_history']} hai (24 hona chahiye)"] if d["domain"].get("pwd_history") is not None and d["domain"]["pwd_history"] < 24 else []),
-    ("POL-16",  "Minimum Password Age is Zero",       "Low",    lambda d: ["Minimum password age 0 hai — user purana password foran wapas rakh sakta hai"] if d["domain"].get("min_pwd_age_days") == 0 else []),
+    ("POL-14",  "Password Complexity Not Enforced",   "High",   lambda d: ["Password complexity requirement is not enabled"] if d["domain"].get("pwd_properties") is not None and (d["domain"]["pwd_properties"] & 1) == 0 else []),
+    ("POL-15",  "Password History Too Low (<24)",     "Low",    lambda d: [f"Password history is only {d['domain']['pwd_history']} (it should be 24)"] if d["domain"].get("pwd_history") is not None and d["domain"]["pwd_history"] < 24 else []),
+    ("POL-16",  "Minimum Password Age is Zero",       "Low",    lambda d: ["Minimum password age is 0 — a user can immediately reuse an old password"] if d["domain"].get("min_pwd_age_days") == 0 else []),
     ("CS-16",   "Templates Allowing Exportable Private Key", "Medium", lambda d: [t["name"] for t in d.get("cert_templates", []) if t.get("exportable")]),
     ("CS-17",   "HTTP Certificate Enrollment (ESC8-Style)", "High", lambda d: [f"{ca['name']}: {url}" for ca in d.get("cas", []) for url in ca.get("enrollment_servers", []) if str(url).lower().startswith("http://")]),
     ("PRIV-26", "Dangerous Rights on GPOs",           "High",   check_gpo_rights),
@@ -1012,22 +1012,22 @@ CHECKS = [
     ("AUTH-35", "Key Credentials Present (Shadow Credentials)", "Info", lambda d: [u["name"] for u in d["users"] if u.get("key_cred_count")]),
     ("AUTH-36", "Key Credentials on Privileged Accounts", "High", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u.get("key_cred_count")]),
     ("DS-37",   "Forest Functional Level",              "Info",   lambda d: [f"Forest functional level: {FL_NAMES.get(d.get('forest_fl', 0), d.get('forest_fl'))}"]),
-    ("DS-38",   "Forest Level Lower Than Domain Level", "Medium", lambda d: ["Forest level domain level se purana hai"] if d.get("forest_fl", 0) < d["domain"].get("functional_level", 0) else []),
+    ("DS-38",   "Forest Level Lower Than Domain Level", "Medium", lambda d: ["Forest level is older than domain level"] if d.get("forest_fl", 0) < d["domain"].get("functional_level", 0) else []),
     ("PRIV-31", "All Domain Admins (Transitive)",    "Info",   check_transitive_da),
     ("PRIV-32", "Privileged Accounts in Default Container", "Low", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u.get("dn") and ",CN=Users," in u["dn"]]),
     ("AUTH-37", "Privileged Accounts That Can Be Delegated", "Medium", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u["enabled"] and not (u["uac"] & 0x100000)]),
-    ("AUTH-38", "Passwords Older Than Domain Max Age", "Medium", lambda d: [f"{u['name']} ({days_ago(u['pwd_set'])} din — policy {d['domain'].get('max_pwd_age_days')} din)" for u in d["users"] if u["enabled"] and not (u["uac"] & 0x10000) and days_ago(u["pwd_set"]) is not None and d["domain"].get("max_pwd_age_days") and days_ago(u["pwd_set"]) > d["domain"]["max_pwd_age_days"]]),
+    ("AUTH-38", "Passwords Older Than Domain Max Age", "Medium", lambda d: [f"{u['name']} ({days_ago(u['pwd_set'])} days — policy {d['domain'].get('max_pwd_age_days')} days)" for u in d["users"] if u["enabled"] and not (u["uac"] & 0x10000) and days_ago(u["pwd_set"]) is not None and d["domain"].get("max_pwd_age_days") and days_ago(u["pwd_set"]) > d["domain"]["max_pwd_age_days"]]),
     ("AUTH-39", "Built-in Guest (RID 501) Status",   "Info",   lambda d: [f"{u['name']} (enabled: {u['enabled']})" for u in d["users"] if (u.get("sid") or "").endswith("-501")]),
     ("DS-39",   "Empty OUs",                         "Low",    check_empty_ous),
     ("CS-20",   "Published Code-Signing Templates",  "Medium", lambda d: [t["name"] for t in d.get("cert_templates", []) if t["name"] in published_names(d) and "1.3.6.1.5.5.7.3.3" in t.get("eku", [])]),
-    ("POL-17",  "Anonymous LDAP Bind Allowed",       "Medium", lambda d: ["Baghair login ke directory parhi ja sakti hai"] if d.get("anon_bind") else []),
+    ("POL-17",  "Anonymous LDAP Bind Allowed",       "Medium", lambda d: ["The directory can be read without logging in"] if d.get("anon_bind") else []),
     ("POL-18",  "Disabled GPO Links",                "Info",   check_disabled_links),
     ("HYB-08",  "Privileged Accounts With Non-Routable UPN", "Medium", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u.get("upn") and u["upn"].lower().endswith(".local")]),
-    ("POL-19", "GPO Content Coverage",            "Info",     lambda d: [f"{len(d.get('gpo_content', {}))} of {len(d.get('gpos', []))} GPOs ka content parha gaya"] if d.get("gpo_content") is not None else []),
+    ("POL-19", "GPO Content Coverage",            "Info",     lambda d: [f"{len(d.get('gpo_content', {}))} of {len(d.get('gpos', []))} GPOs had content read"] if d.get("gpo_content") is not None else []),
     ("POL-20", "GPP Password (cpassword) in GPO Files", "Critical", lambda d: [n for n, e in d.get("gpo_content", {}).items() if e.get("cpassword")]),
     ("POL-21", "SMB Signing Explicitly Not Required (GPO)", "Medium", lambda d: [n for n, e in d.get("gpo_content", {}).items() if reg_val(e, "machine\\system\\currentcontrolset\\services\\lanmanserver\\parameters\\requiresecuritysignature") == "0"]),
     ("POL-22", "LDAP Signing Not Required (GPO)",  "Medium",   lambda d: [n for n, e in d.get("gpo_content", {}).items() if reg_val(e, "machine\\system\\currentcontrolset\\services\\ntds\\parameters\\ldapserverintegrity") in ("0", "1")]),
-    ("POL-23", "No Logon Auditing in DC Policy",   "Medium",   lambda d: ["Default Domain Controllers Policy mein logon auditing band hai"] if d.get("gpo_content", {}).get("Default Domain Controllers Policy", {}).get("sec", {}).get("event audit", {}).get("auditlogonevents") == "0" and d.get("gpo_content", {}).get("Default Domain Controllers Policy", {}).get("sec", {}).get("event audit", {}).get("auditaccountlogonevents") == "0" else []),
+    ("POL-23", "No Logon Auditing in DC Policy",   "Medium",   lambda d: ["Logon auditing is disabled in the Default Domain Controllers Policy"] if d.get("gpo_content", {}).get("Default Domain Controllers Policy", {}).get("sec", {}).get("event audit", {}).get("auditlogonevents") == "0" and d.get("gpo_content", {}).get("Default Domain Controllers Policy", {}).get("sec", {}).get("event audit", {}).get("auditaccountlogonevents") == "0" else []),
     ("POL-24", "Dangerous User Rights Assigned in GPOs", "High", check_gpo_rights_bad), 
     ("POL-25", "Weak LM/NTLM Level Set in GPO",    "Medium",   lambda d: [n for n, e in d.get("gpo_content", {}).items() if reg_val(e, "machine\\system\\currentcontrolset\\control\\lsa\\lmcompatibilitylevel") in ("0", "1", "2")]),
     ("POL-26", "Windows Defender Disabled by GPO", "High",     check_defender_gpo),
@@ -1136,7 +1136,7 @@ try:
     already_priv, reaching = find_reachability(_D)
 except Exception:
     already_priv, reaching = [], []
-    print("Note: reachability data nahi mila (paths.py)")
+    print("Note: reachability data not found (paths.py)")
 
 _cnt = _Counter()
 _names = [u.get("name", "") for u in _D.get("users", [])]

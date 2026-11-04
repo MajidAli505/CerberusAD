@@ -2,7 +2,7 @@ import argparse, json, os
 from ldap3 import Server, Connection, ALL, NTLM
 
 p = argparse.ArgumentParser()
-p.add_argument("--dc", required=True, help="DC ka IP ya naam")
+p.add_argument("--dc", required=True, help="IP address or name of the DC")
 p.add_argument("--user", required=True, help="e.g. DOMAIN\\user")
 p.add_argument("--password", required=True)
 args = p.parse_args()
@@ -17,7 +17,7 @@ print("Connected. Base DN:", BASE)
 from datetime import datetime, timedelta, timezone
 
 def sid_to_str(val):
-    # objectSid (raw bytes) ko "S-1-5-21-..." wali parhi jane wali shakal mein badalna
+    # Convert objectSid (raw bytes) into the readable "S-1-5-21-..." form
     if val is None:
         return ""
     if isinstance(val, str):
@@ -35,11 +35,11 @@ def filetime(ft):
     ft = first(ft)
     if ft is None:
         return None
-    if isinstance(ft, datetime):     # ldap3 ne khud date bana di hai — waisa hi chor do
+    if isinstance(ft, datetime):     # ldap3 already produced a datetime — leave it as is
         return ft
     ft = int(ft)
     if ft == 0 or ft == 9223372036854775807:
-        return None                  # 0 ya max value = "kabhi nahi"
+        return None                  # 0 or the maximum value = "never"
     return datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ft / 10)
 
 def has_flag(uac, flag):
@@ -57,9 +57,9 @@ def as_list(v):
         return v
     return [v]
 
-# Yaad karne wale flags:
-DISABLED        = 0x2        # account band hai
-NEVER_EXPIRES   = 0x10000    # password kabhi expire nahi
+# Key flags to remember:
+DISABLED        = 0x2        # account is disabled
+NEVER_EXPIRES   = 0x10000    # password never expires
 PREAUTH_NOT_REQ = 0x400000   # AS-REP roastable!
 UNCONSTRAINED   = 0x80000    # unconstrained delegation
 
@@ -305,11 +305,11 @@ print("Groups:", len(groups))
 def by_rid(rid):
     return [g for g in groups if g["sid"].endswith("-" + str(rid))]
 
-da_group = by_rid(512)   # Domain Admins — har AD mein, har language mein
+da_group = by_rid(512)   # Domain Admins — present in every AD, in every language
 if da_group:
     print("Domain Admins members:", len(da_group[0]["members"]))
 else:
-    print("Domain Admins group nahi mila — SID wala hisa check karna hoga")
+    print("Domain Admins group not found — check the SID-based lookup")
 
 # ---------- Computers ----------
 computers = []
@@ -337,12 +337,12 @@ print("Computers:", len(computers))
 
 
 
-# ---------- ACL (permissions) parhna ----------
+# ---------- Reading ACLs (permissions) ----------
 import uuid
 from ldap3.protocol.microsoft import security_descriptor_control
 
 def get_sd(dn):
-    # SD-flags control ke baghair DC permission list ka sirf hisa deta hai — ye control kehta hai "sirf DACL do"
+    # Without the SD-flags control, the DC returns only part of the permissions — this control asks for "only the DACL"
     try:
         ok = conn.search(dn, "(objectClass=*)", search_scope=0,
                          attributes=["nTSecurityDescriptor"],
@@ -364,7 +364,7 @@ def parse_sid(b, off):
     return "-".join(parts)
 
 def parse_acl(sd):
-    # Binary security descriptor ke andar DACL dhoondh kar har ACE (permission entry) parhna
+    # Find the DACL inside the binary security descriptor and read each ACE (permission entry)
     if not sd:
         return []
     dacl_off = int.from_bytes(sd[16:20], "little")
@@ -376,7 +376,7 @@ def parse_acl(sd):
     for _ in range(ace_count):
         ace_type = sd[pos]
         ace_size = int.from_bytes(sd[pos + 2:pos + 4], "little")
-        if ace_type in (0, 5):   # 0 = simple permission, 5 = kisi khaas haq (extended right) wali permission
+        if ace_type in (0, 5):   # 0 = simple permission, 5 = permission carrying a specific right (extended right)
             mask = int.from_bytes(sd[pos + 4:pos + 8], "little")
             obj_types = []
             sid_off = pos + 8
@@ -457,7 +457,7 @@ for e in search_all(CONFIG, "(objectClass=crossRefContainer)",
     break
 
 
-# LAPS ka nishan schema mein hai ya nahi
+# Whether the LAPS marker exists in the schema
 laps_schema = len(search_all(SCHEMA, "(lDAPDisplayName=ms-Mcs-AdmPwd)", ["cn"])) > 0
 
 # ---------- Anonymous bind test ----------
@@ -472,7 +472,7 @@ except Exception:
     anon_bind = False
 print("Anonymous bind works:", anon_bind)
 
-# ---------- GPO content (SYSVOL se files parhna) ----------
+# ---------- GPO content (reading files from SYSVOL) ----------
 import subprocess, tempfile, re
 
 def parse_inf(raw):
@@ -492,7 +492,7 @@ def parse_inf(raw):
     return out
 
 def parse_pol(data):
-    # registry.pol ka binary format: "PReg" ke baad [key;value;type;size;data] entries
+    # Binary format of registry.pol: "PReg" followed by [key;value;type;size;data] entries
     out = {}
     if data[:4] != b"PReg":
         return out
