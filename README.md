@@ -2,13 +2,13 @@
 
 **Active Directory security assessment scanner** — named after Cerberus, the three-headed guard dog of the underworld, the same creature the Kerberos protocol itself is named after. CerberusAD stands at the gate of a domain and reports what is weak, what is dangerous, and what to fix first.
 
-CerberusAD is a two-stage defensive scanner. A collector queries a Domain Controller **live** over LDAP (plus SYSVOL over SMB for GPO internals) and saves everything to one JSON file. An analyser then runs **161 security checks** against that data and produces a self-contained HTML report with a risk score, an ordered fix plan, and a privilege-reachability analysis.
+CerberusAD is a two-stage defensive scanner. A collector queries a Domain Controller **live** over LDAP (plus SYSVOL over SMB for GPO internals) and saves everything to one JSON file. An analyser then runs **163 security checks** against that data and produces a self-contained HTML report with a risk score, an ordered fix plan, and a privilege-reachability analysis.
 
 It is domain-agnostic by design: the DC, credentials and base DN come from command-line arguments and auto-detection, and privileged groups are located by well-known RID rather than by name, so it runs unchanged against any domain.
 
 ## Highlights
 
-- **161 checks in 6 groups** — Authentication (39), Privileged Access (32), Directory Services (36), Policy & Configuration (26), AD Certificate Services (20), Hybrid Identity (8). Every check reports PASS (clean), FAIL (weakness found, with the affected objects listed) or INFO.
+- **163 checks in 6 groups** — Authentication (39), Privileged Access (32), Directory Services (36), Policy & Configuration (26), AD Certificate Services (22), Hybrid Identity (8). Every check reports PASS (clean), FAIL (weakness found, with the affected objects listed) or INFO.
 - **Hand-written binary ACL parser** — security descriptors are parsed byte-by-byte to find hidden replication (DCSync) rights and dangerous permissions that name-based reviews miss.
 - **Privilege reachability engine** — builds a permission graph (memberships, password-reset rights, group-write rights, replication rights, GPO edit rights, ESC1-style certificate paths) and computes which accounts can reach Domain Admin, how many steps away they are, and which single fix cuts the most paths.
 - **GPO internals, not GPO names** — SYSVOL content is downloaded and parsed directly (GptTmpl.inf and registry.pol, with a hand-written PReg parser), so settings such as LDAP signing and LM authentication level are read from the files themselves. A GPO with an alarming name but empty content is correctly reported clean.
@@ -20,7 +20,7 @@ It is domain-agnostic by design: the DC, credentials and base DN come from comma
 | File | Role |
 |---|---|
 | `collector.py` | Connects to the DC (LDAP, NTLM) and collects users, groups, computers, OUs, GPOs and their content, trusts, sites, AD CS templates and CAs, ACLs and policy data into `collected.json`. Runs fine as an ordinary domain user. |
-| `checks.py` | Runs all 161 checks, prints the results, and writes `findings.json`, `findings.csv` and the full `report.html` (findings tab + privilege-paths tab). |
+| `checks.py` | Runs all 163 checks, prints the results, and writes `findings.json`, `findings.csv` and the full `report.html` (findings tab + privilege-paths tab). |
 | `paths.py` | The reachability engine: who is already privileged, who can reach Domain Admin, and the shortest chain for each account — every step labelled with the permission, its risk, and its fix. |
 
 ## Usage
@@ -35,7 +35,7 @@ python3 paths.py         # reachability summary
 Example console output:
 
 ```
-Total: 161 checks | PASS: 72 | FAIL: 43 | INFO: 46
+Total: 163 checks | PASS: 74 | FAIL: 43 | INFO: 46
 ```
 
 ## Validation

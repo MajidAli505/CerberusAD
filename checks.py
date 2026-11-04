@@ -469,6 +469,22 @@ def check_esc1_published(d):
             if t["name"] in pub and (t["name_flag"] & 1)
             and t["ra_signature"] == 0 and has_client_auth(t)]
 
+def check_esc9(d):
+    # ESC9: the template strips the certificate security extension
+    # (CT_FLAG_NO_SECURITY_EXTENSION, 0x80000000 in msPKI-Enrollment-Flag),
+    # which weakens certificate binding on accounts that use the certificate.
+    pub = published_names(d)
+    return [t["name"] for t in d.get("cert_templates", [])
+            if t["name"] in pub and has_client_auth(t) and (t.get("enroll_flag", 0) & 0x80000000)]
+
+def check_esc15(d):
+    # ESC15 (EKUwu): a schema version 1 template where the enrollee supplies
+    # the subject - on v1 templates the enrollee can also influence the
+    # application policies, which modern templates do not allow.
+    pub = published_names(d)
+    return [t["name"] for t in d.get("cert_templates", [])
+            if t["name"] in pub and t.get("schema_version") == 1 and (t["name_flag"] & 1)]
+
 def check_published_no_approval(d):
     pub = published_names(d)
     return [t["name"] for t in d.get("cert_templates", [])
@@ -1020,6 +1036,8 @@ CHECKS = [
     ("AUTH-39", "Built-in Guest (RID 501) Status",   "Info",   lambda d: [f"{u['name']} (enabled: {u['enabled']})" for u in d["users"] if (u.get("sid") or "").endswith("-501")]),
     ("DS-39",   "Empty OUs",                         "Low",    check_empty_ous),
     ("CS-20",   "Published Code-Signing Templates",  "Medium", lambda d: [t["name"] for t in d.get("cert_templates", []) if t["name"] in published_names(d) and "1.3.6.1.5.5.7.3.3" in t.get("eku", [])]),
+    ("CS-21",   "ESC9 Templates (No Security Extension)", "High",   check_esc9),
+    ("CS-22",   "ESC15 Schema V1 Templates (EKUwu)",      "High",   check_esc15),
     ("POL-17",  "Anonymous LDAP Bind Allowed",       "Medium", lambda d: ["The directory can be read without logging in"] if d.get("anon_bind") else []),
     ("POL-18",  "Disabled GPO Links",                "Info",   check_disabled_links),
     ("HYB-08",  "Privileged Accounts With Non-Routable UPN", "Medium", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u.get("upn") and u["upn"].lower().endswith(".local")]),
@@ -1092,7 +1110,7 @@ MITRE_MAP = {
  "AUTH-23": ("T1078.002 Domain Accounts", None),
  "AUTH-32": ("T1552 Unsecured Credentials", None),
  "POL-01": ("T1110 Brute Force", "1.1.4 Minimum password length"),
- "POL-02": ("T1110.003 Password Spraying", "1.2.2 Account lockout threshold"),
+ "POL-02": ("T1136.002 Create Account: Domain Account", None),
  "POL-20": ("T1552.001 Credentials In Files", None),
  "POL-22": ("T1557 Adversary-in-the-Middle", None),
  "POL-25": ("T1557.001 LLMNR/NBT-NS Poisoning and Relay", "2.3.11.7 LAN Manager authentication level"),
@@ -1107,6 +1125,12 @@ MITRE_MAP = {
  "CS-07": ("T1649 Steal or Forge Authentication Certificates", None),
  "CS-11": ("T1649 Steal or Forge Authentication Certificates", None),
  "CS-12": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-05": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-17": ("T1557 Adversary-in-the-Middle", None),
+ "CS-18": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-19": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-21": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-22": ("T1649 Steal or Forge Authentication Certificates", None),
 }
 
 
@@ -1205,6 +1229,10 @@ FIXES = {
              "Re-run the scan - CS-07 should shrink or PASS."),
  "CS-12": ("Unpublish templates that are not in use. For the ones that stay published, enable CA manager approval - a published template without approval can be requested by any user allowed to enroll.",
              "Re-run the scan - CS-12 should PASS."),
+ "CS-21": ("Clear the NO_SECURITY_EXTENSION bit (0x80000000) in the template's msPKI-Enrollment-Flag, so certificates it issues carry the security extension that strong certificate binding relies on.",
+             "Re-run the scan - CS-21 should PASS."),
+ "CS-22": ("Retire the schema v1 template: duplicate it as a schema version 2 (or higher) template, publish the new one, and unpublish the v1 original. If it must stay, turn off 'Supply in the request' on it.",
+             "Re-run the scan - CS-22 should PASS."),
 }
 
 fixplan = ""
