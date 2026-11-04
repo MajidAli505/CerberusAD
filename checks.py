@@ -1325,6 +1325,24 @@ if _cs_folded:
     cs_table += ('<p class="folded">' + str(len(_cs_folded)) + ' more templates are Standard risk and not published: ' +
                  esc(", ".join(sorted(_cs_folded))) + '</p>')
 
+_whatif_rows = ""
+_ages = []
+for u in _D.get("users", []):
+    _a = _pwd_age(u)
+    if _a is not None and u.get("enabled", True):
+        _ages.append((u.get("name", ""), _a, u.get("admin_count") == 1, bool(u.get("uac", 0) & 0x10000)))
+_scenarios = []
+for _limit in (90, 180):
+    _hit = [x for x in _ages if x[1] > _limit]
+    _scenarios.append(("Force a password change every " + str(_limit) + " days",
+                       str(len(_hit)) + " enabled accounts (" + str(sum(1 for x in _hit if x[2])) + " privileged) are already past that age and would have to change their password"))
+_nev = [x for x in _ages if x[3]]
+_scenarios.append(("Remove 'password never expires' from every account",
+                   str(len(_nev)) + " enabled accounts (" + str(sum(1 for x in _nev if x[2])) + " privileged) would start expiring like everyone else"))
+for _t, _e in _scenarios:
+    _whatif_rows += '<tr><td>' + esc(_t) + '</td><td>' + esc(_e) + '</td></tr>'
+whatif_html = ('<table class="dtable"><tr><th>If this policy changed...</th><th>...this is what would happen</th></tr>' + _whatif_rows + '</table>') if _whatif_rows else ""
+
 
 
 _mcount = {}
@@ -1502,7 +1520,7 @@ tab1 = ('<div id="t1" class="tabpage">'
         '<h2 id="quick">Quick Wins - fix these first (big impact, easy to fix)</h2><div class="card quick-card">' +
         ("".join(finding_html(r) for r in quick) or "<p>None.</p>") + '</div>'
         '<h2>MITRE ATT&amp;CK Coverage</h2>' + mitre_html + '<h2 id="findings">All Findings (worst first)</h2>' + "".join(finding_html(r) for r in fails) +
-        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + '</div>')
+        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + (('<h2>Password Policy What-If</h2>' + whatif_html) if whatif_html else '') + '</div>')
 
 
 
