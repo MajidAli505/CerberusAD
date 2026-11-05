@@ -1349,6 +1349,50 @@ if _opt_rows:
                       '<th>Findings reduced</th><th>Paths blocked</th><th>Score drop (alone)</th></tr>' + _trs + '</table>'
                       '<p><b>Projected score if you work in this order:</b> ' + ' &#8594; '.join(_journey) + '</p>')
 
+AUTO_PS = {
+ "AUTH-03": lambda nm: ["Set-ADUser -Identity '" + nm + "' -PasswordNeverExpires $false -WhatIf"],
+ "AUTH-07": lambda nm: ["Set-ADUser -Identity '" + nm + "' -ChangePasswordAtLogon $true -WhatIf"],
+ "AUTH-32": lambda nm: ["Set-ADUser -Identity '" + nm + "' -Clear Description -WhatIf"],
+}
+_dns = ".".join(p.replace("DC=", "") for p in _D["domain"].get("base_dn", "").split(",") if p.strip().upper().startswith("DC="))
+_ps = ["# CerberusAD remediation script - generated " + _dt.now().strftime("%d %B %Y"),
+       "# Domain: " + _dns,
+       "# REVIEW EVERY STEP BEFORE RUNNING. Commands that change something end in -WhatIf:",
+       "# they only SHOW what would happen. Remove -WhatIf from a block when you are ready.",
+       "# Steps without a ready command are manual - the comments tell you exactly what to do.",
+       "# Run as a Domain Admin on a DC or a machine with the ActiveDirectory PowerShell module.",
+       "", "Import-Module ActiveDirectory", ""]
+_psn = 0
+for r in fails:
+    _psn += 1
+    if r["id"] in FIXES:
+        _pfix, _pverify = FIXES[r["id"]]
+    else:
+        _pfix = ("Generic fix - review the accounts, groups, settings or templates listed in this finding, "
+                 "remove or correct the risky setting shown, and document any account that must legitimately stay.")
+        _pverify = "Re-run the scan - " + r["id"] + " should PASS."
+    _ps.append("# ------------------------------------------------------------")
+    _ps.append("# Step " + str(_psn) + ": [" + r["id"] + "] " + r["title"] + " (" + r["severity"] + ")")
+    _ps.append("# Fix: " + _pfix)
+    _ps.append("# Verify: " + _pverify)
+    if r["items"]:
+        _ps.append("# Affected: " + "; ".join(r["items"][:12]))
+    _cmds = []
+    if r["id"] in AUTO_PS:
+        for _it in r["items"]:
+            _cmds += AUTO_PS[r["id"]](_it.split(" (")[0].replace("'", ""))
+    elif r["id"] == "POL-01" and _dns:
+        _cmds = ["Set-ADDefaultDomainPasswordPolicy -Identity '" + _dns + "' -MinPasswordLength 14 -WhatIf"]
+    elif r["id"] == "POL-02" and _dns:
+        _cmds = ["Set-ADDomain -Identity '" + _dns + "' -Replace @{'ms-DS-MachineAccountQuota'=0} -WhatIf"]
+    if _cmds:
+        _ps += _cmds
+    else:
+        _ps.append("# (manual step - no safe automatic command for this one)")
+    _ps.append("")
+with open("remediation.ps1", "w", encoding="utf-8") as fh:
+    fh.write("\n".join(_ps))
+
 _reach_names = {n for (n, _s) in reaching}
 _prof_users = [u for u in _D.get("users", []) if u.get("admin_count") == 1 or u.get("name") in _reach_names]
 _prof_users.sort(key=lambda u: -_cnt.get(u.get("name", ""), 0))
@@ -1482,6 +1526,59 @@ for _t in sorted(_mcount, key=lambda t: -len(_mcount[t])):
     mitre_rows += ('<tr><td>' + esc(_t) + '</td><td>' + str(len(_mcount[_t])) + '</td><td>' +
                    esc(", ".join(_mcount[_t])) + '</td></tr>')
 mitre_html = ('<table><tr><th>Technique</th><th>Failed findings</th><th>Checks</th></tr>' + mitre_rows + '</table>') if mitre_rows else '<p>No mapped findings.</p>'
+
+TACTICS = {"T1003.006": "credential-access", "T1078.002": "persistence", "T1098": "persistence",
+           "T1110": "credential-access", "T1136.002": "persistence", "T1552": "credential-access",
+           "T1552.001": "credential-access", "T1557": "credential-access", "T1557.001": "credential-access",
+           "T1558.003": "credential-access", "T1558.004": "credential-access", "T1649": "credential-access"}
+DETECTION = {
+ "T1003.006": "Watch Event 4662 directory-replication accesses (replication GUIDs) coming from any host that is not a Domain Controller.",
+ "T1078.002": "Alert on 4624 logons by privileged or dormant accounts from new hosts or at unusual hours.",
+ "T1098": "Monitor 4728 / 4732 / 4756 (member added to a privileged group) and 4738 (account changed) for privileged accounts.",
+ "T1110": "Monitor bursts of 4625 failed logons and 4771 / 4776 failures concentrated on single accounts.",
+ "T1136.002": "Alert on 4720 (account created) followed quickly by 4728 (added to a privileged group).",
+ "T1552": "Scan account descriptions, logon scripts and GPO files for stored secrets on a schedule; alert on bulk reads of user attributes.",
+ "T1552.001": "Scan SYSVOL and GPP files for cpassword and plaintext credentials; alert on unusual reads of SYSVOL shares.",
+ "T1557": "Require SMB and LDAP signing, disable LLMNR / NBT-NS, and alert on NTLM (4624, package NTLM) logons to servers from unexpected hosts.",
+ "T1557.001": "Disable LLMNR / NBT-NS via GPO; alert when a workstation answers name-resolution broadcasts for names that do not exist in DNS.",
+ "T1558.003": "Monitor 4769 service-ticket requests using RC4 (0x17) or by accounts that never normally request them; plant a honey SPN account and alert on any ticket for it.",
+ "T1558.004": "Monitor 4771 pre-auth failures (code 0x18) and alert on any account found with pre-authentication disabled.",
+ "T1649": "Monitor CA events 4886 / 4887 for certificates issued from templates that allow a requester-supplied subject; alert on certificate logons (4624) by admin accounts from new hosts.",
+}
+_tech = {}
+for r in fails:
+    _m = MITRE_MAP.get(r["id"])
+    if _m:
+        _tech.setdefault(_m[0].split()[0], {"name": _m[0], "ids": []})["ids"].append(r["id"])
+_layer = {"name": "CerberusAD findings layer",
+          "versions": {"attack": "13", "navigator": "4.9.1", "layer": "4.4"},
+          "domain": "enterprise-attack",
+          "description": "MITRE ATT&CK techniques behind the failed checks in this CerberusAD report. Score = number of failed checks mapped to the technique (max 10).",
+          "techniques": [],
+          "gradient": {"colors": ["#ffffff", "#ff6666", "#b00020"], "minValue": 0, "maxValue": 10},
+          "legendItems": [], "showTacticRowBackground": True, "tacticRowBackground": "#205b85",
+          "selectTechniquesAcrossTactics": True, "selectSubtechniquesWithParent": False}
+for _tid, _info in sorted(_tech.items()):
+    _e = {"techniqueID": _tid, "comment": ", ".join(_info["ids"]),
+          "score": min(len(_info["ids"]), 10), "enabled": True,
+          "metadata": [{"name": "Checks", "value": ", ".join(_info["ids"])}]}
+    if _tid in TACTICS:
+        _e["tactic"] = TACTICS[_tid]
+    _layer["techniques"].append(_e)
+with open("attack_layer.json", "w", encoding="utf-8") as fh:
+    json.dump(_layer, fh, indent=1)
+_dp = ["# Detection Pack", "",
+       "For every failed check that maps to MITRE ATT&CK: the technique behind it and what to monitor.", ""]
+for r in fails:
+    _m = MITRE_MAP.get(r["id"])
+    if not _m:
+        continue
+    _dp.append("## " + r["id"] + " - " + r["title"])
+    _dp.append("- Technique: " + _m[0])
+    _dp.append("- Monitor: " + DETECTION.get(_m[0].split()[0], "Monitor authentication and directory-change events around the affected objects."))
+    _dp.append("")
+with open("detection_pack.md", "w", encoding="utf-8") as fh:
+    fh.write("\n".join(_dp))
 
 
 KIND_LABELS = {"MemberOf": "member of", "ResetPassword": "can reset password",
@@ -1658,6 +1755,120 @@ if reaching:
 else:
     sim_html = ""
 
+_gname_by_dn = {g.get("dn"): g.get("name") for g in _D.get("groups", [])}
+_name_by_dn = dict(_gname_by_dn)
+for _u in _D.get("users", []):
+    _name_by_dn[_u.get("dn")] = _u.get("name")
+_parents = {}
+for _g in _D.get("groups", []):
+    for _mdn in _g.get("members", []):
+        _cn = _name_by_dn.get(_mdn)
+        if _cn:
+            _parents.setdefault(_cn, set()).add(_g.get("name"))
+_step_edges = {}
+_domain_labels = set()
+for (_n, _steps) in reaching:
+    for (_frm, _kind, _to, _t, _r, _f) in _steps:
+        _step_edges.setdefault(_frm, set()).add(_to)
+        if str(_to).startswith("the domain"):
+            _domain_labels.add(_to)
+_tz_names = {g.get("name") for g in _D.get("groups", [])
+             if str(g.get("sid", "")).rsplit("-", 1)[-1] in ("512", "518", "519")}
+_reach_map = {n: len(s) for (n, s) in reaching}
+_already_set = set(already_priv)
+COMP = {}
+_rank = []
+for _u in _D.get("users", []):
+    _nm = _u.get("name")
+    if not _nm or not _u.get("enabled", True):
+        continue
+    _seen = set()
+    _stack = [_nm]
+    while _stack:
+        _x = _stack.pop()
+        if _x in _seen:
+            continue
+        _seen.add(_x)
+        for _y in _step_edges.get(_x, ()):
+            if _y not in _seen:
+                _stack.append(_y)
+        for _p in _parents.get(_x, ()):
+            if _p not in _seen:
+                _stack.append(_p)
+    _da = _nm in _already_set or any(t in _seen for t in _tz_names) or any(d in _seen for d in _domain_labels)
+    _c = {"da": bool(_da),
+          "steps": 0 if _nm in _already_set else _reach_map.get(_nm),
+          "users": sum(1 for x in _seen if x != _nm and node_type(x) == "USER"),
+          "groups": sum(1 for x in _seen if node_type(x) == "GROUP")}
+    COMP[_nm] = _c
+    if _c["da"] or _c["users"] or _c["groups"]:
+        _rank.append((_nm, _c))
+_rank.sort(key=lambda kv: (not kv[1]["da"], kv[1]["steps"] is None, kv[1]["steps"] or 99, -kv[1]["users"], -kv[1]["groups"]))
+comp_json = json.dumps(COMP)
+if COMP:
+    _copts = "".join('<option value="' + esc(n) + '">' + esc(n) + '</option>' for n in sorted(COMP))
+    _ctrs = ""
+    for (_nm, _c) in _rank[:8]:
+        _ctrs += ('<tr><td><b>' + esc(_nm) + '</b></td><td>' + ("Yes" if _c["da"] else "No") + '</td><td>' +
+                  ("-" if _c["steps"] is None else str(_c["steps"])) + '</td><td>' + str(_c["users"]) +
+                  '</td><td>' + str(_c["groups"]) + '</td></tr>')
+    comp_html = ('<div class="card sim-card"><div class="simtitle">Compromise Simulator</div>'
+                 '<p class="simnote">Pick any account and see what falls if it is phished or its password leaks - '
+                 'computed from the same permissions as the paths below.</p>'
+                 '<select id="compSel" class="sbox" onchange="compShow()">' + _copts + '</select>'
+                 '<div class="compout" id="compOut"></div>'
+                 + (('<h3 class="subh">Most dangerous accounts if compromised</h3>'
+                     '<table class="dtable"><tr><th>Account</th><th>Reaches DA</th><th>Steps to DA</th>'
+                     '<th>Accounts reachable</th><th>Groups reachable</th></tr>' + _ctrs + '</table>') if _ctrs else '')
+                 + '</div>')
+else:
+    comp_html = ""
+
+_dom_label = next(iter(_domain_labels), "the domain (Domain Admin level)")
+_med = {}
+_mnodes = {}
+def _madd(lbl):
+    if lbl not in _mnodes:
+        _mnodes[lbl] = node_type(lbl)
+for (_n, _steps) in sorted(reaching, key=lambda x: len(x[1]))[:25]:
+    for (_frm, _kind, _to, _t, _r, _f) in _steps:
+        _med[(_frm, _to)] = _kind
+        _madd(_frm)
+        _madd(_to)
+for _nm in already_priv[:25]:
+    _u = next((x for x in _D.get("users", []) if x.get("name") == _nm), None)
+    if not _u:
+        continue
+    _madd(_nm)
+    for _gdn in _u.get("member_of", []):
+        _gn = _gname_by_dn.get(_gdn)
+        if _gn in _tz_names:
+            _med[(_nm, _gn)] = "MemberOf"
+            _madd(_gn)
+            _med[(_gn, _dom_label)] = "TierZero"
+            _madd(_dom_label)
+_mdepth = {_dom_label: 0}
+for _ in range(len(_mnodes) + 1):
+    for (_a, _b) in _med:
+        if _b in _mdepth:
+            _nd = _mdepth[_b] + 1
+            if _nd < _mdepth.get(_a, 99):
+                _mdepth[_a] = _nd
+_maxd = max(_mdepth.values()) if _mdepth else 0
+_nlist = sorted(_mnodes)
+_nidx = {lbl: i for i, lbl in enumerate(_nlist)}
+MAP = {"nodes": [{"i": _nidx[lbl], "label": lbl, "type": _mnodes[lbl], "depth": _mdepth.get(lbl, _maxd + 1)} for lbl in _nlist],
+       "edges": [{"a": _nidx[a], "b": _nidx[b], "kind": KIND_LABELS.get(k, k)} for (a, b), k in sorted(_med.items())]}
+map_json = json.dumps(MAP)
+if _mnodes:
+    map_section = ('<h3 class="subh">Domain Privilege Map</h3><div class="card">'
+                   '<p class="simnote">Every account and group sitting on a path to Domain Admin (25 shortest paths plus already-privileged accounts). '
+                   'The domain sits on the right - the closer a circle is to it, the closer that account is to full control. Click a circle to light up its routes; hover a line to see the permission.</p>'
+                   '<svg id="dommap" role="img" aria-label="Privilege map"></svg>'
+                   '<div class="maplegend"><span class="dot du"></span> User &nbsp; <span class="dot dg"></span> Group &nbsp; <span class="dot dd"></span> Domain</div></div>')
+else:
+    map_section = ""
+
 sf_options = '<option value="ALL">All accounts</option>' + "".join(
     '<option value="' + esc(n) + '">' + esc(n) + '</option>' for (n, _s) in reaching)
 
@@ -1671,9 +1882,9 @@ if reaching:
 else:
     explorer = '<div class="card"><p>No account outside the admin groups can reach Domain Admin through the permissions collected.</p></div>'
 
-tab2 = ('<h2 style="margin-top:6px">Privilege Paths</h2>' + tab2_kpis + cut_html + sim_html +
+tab2 = ('<h2 style="margin-top:6px">Privilege Paths</h2>' + tab2_kpis + cut_html + sim_html + comp_html +
         '<h3 class="subh">Tier Zero - already at Domain Admin level (' + str(len(already_priv)) + ')</h3>' + tierzero +
-        '<h3 class="subh">Path Explorer</h3>' + explorer)
+        map_section + '<h3 class="subh">Path Explorer</h3>' + explorer)
 
 
 header = ('<div class="header"><div><h1>Active Directory Security Report</h1>'
@@ -1687,8 +1898,8 @@ tab1 = ('<div id="t1" class="tabpage">'
         '<h2 id="summary">Executive Summary</h2><div class="card">' + summary + '</div>'
         '<h2 id="quick">Quick Wins - fix these first (big impact, easy to fix)</h2><div class="card quick-card">' +
         ("".join(finding_html(r) for r in quick) or "<p>None.</p>") + '</div>'
-        '<h2>MITRE ATT&amp;CK Coverage</h2>' + mitre_html + '<h2 id="findings">All Findings (worst first)</h2>' + "".join(finding_html(r) for r in fails) +
-        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + (('<h2>Remediation Roadmap - biggest impact first</h2>' + optimizer_html) if optimizer_html else '') + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + (('<h2>Password Policy What-If</h2>' + whatif_html) if whatif_html else '') + '</div>')
+        '<h2>MITRE ATT&amp;CK Coverage</h2>' + mitre_html + '<p class="folded">Exports saved next to this report: <b>attack_layer.json</b> (open it in the MITRE ATT&amp;CK Navigator to see these techniques as a heat layer) and <b>detection_pack.md</b> (what to monitor for each technique).</p>' + '<h2 id="findings">All Findings (worst first)</h2>' + "".join(finding_html(r) for r in fails) +
+        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + '<p class="folded">A ready-to-review PowerShell version of this plan was saved as <b>remediation.ps1</b> next to this report. Every command in it runs in -WhatIf mode until you remove that flag yourself.</p>' + (('<h2>Remediation Roadmap - biggest impact first</h2>' + optimizer_html) if optimizer_html else '') + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + (('<h2>Password Policy What-If</h2>' + whatif_html) if whatif_html else '') + '</div>')
 
 
 
@@ -1720,6 +1931,8 @@ script = ('<script>function showTab(id, btn){'
           'document.getElementById(\'pb\'+i).style.width=pct+\'%\';'
           'document.getElementById(\'pt\'+i).textContent=\'Fix progress: \'+done+\' of \'+boxes.length+(done===boxes.length&&boxes.length>0?\' - chain closed\':\'\');}'
           'var SIM=' + sim_json + ';'
+          'var COMP=' + comp_json + ';'
+          'var MAP=' + map_json + ';'
           'function fixChanged(el){'
           'var k=el.getAttribute(\'data-key\');'
           'document.querySelectorAll(\'.fixbox\').forEach(function(b){if(b.getAttribute(\'data-key\')===k){b.checked=el.checked;}});'
@@ -1741,6 +1954,48 @@ script = ('<script>function showTab(id, btn){'
           'document.getElementById(\'simReach\').textContent=Object.keys(reach).length;'
           'document.getElementById(\'simPaths\').textContent=openPaths;'
           'document.getElementById(\'simScore\').textContent=SIM.base-saved;}'
+          'function compShow(){'
+          'var sel=document.getElementById(\'compSel\'); var out=document.getElementById(\'compOut\');'
+          'if(!sel||!out){return;} var c=COMP[sel.value]; if(!c){out.textContent=\'\'; return;}'
+          'var msg;'
+          'if(c.da&&c.steps===0){msg=sel.value+\' is ALREADY at Domain Admin level. If this account falls, the whole domain falls with it.\';}'
+          'else if(c.da){msg=sel.value+\' reaches Domain Admin in \'+c.steps+\' step(s). Along the way it can reach \'+c.users+\' other account(s) and \'+c.groups+\' group(s).\';}'
+          'else{msg=sel.value+\' does not reach Domain Admin through the permissions collected. Blast radius: \'+c.users+\' account(s) and \'+c.groups+\' group(s) reachable.\';}'
+          'out.textContent=msg;}'
+          'function buildMap(){'
+          'var svg=document.getElementById(\'dommap\'); if(!svg||!MAP||!MAP.nodes.length){return;}'
+          'var NS=\'http://www.w3.org/2000/svg\';'
+          'var cols={}; MAP.nodes.forEach(function(n){(cols[n.depth]=cols[n.depth]||[]).push(n);});'
+          'var depths=Object.keys(cols).map(Number); var maxD=Math.max.apply(null,depths);'
+          'var maxCol=0; depths.forEach(function(d){if(cols[d].length>maxCol){maxCol=cols[d].length;}});'
+          'var H=maxCol*58+34; var W=880;'
+          'svg.setAttribute(\'viewBox\',\'0 0 \'+W+\' \'+H);'
+          'var pos={};'
+          'depths.forEach(function(d){var x=W-76-d*((W-150)/Math.max(maxD,1));'
+          'var arr=cols[d].slice().sort(function(p,q){return p.label<q.label?-1:1;});'
+          'arr.forEach(function(n,i){pos[n.i]=[x,30+i*58];});});'
+          'MAP.edges.forEach(function(e){var p=pos[e.a],q=pos[e.b]; if(!p||!q){return;}'
+          'var ln=document.createElementNS(NS,\'line\');'
+          'ln.setAttribute(\'x1\',p[0]); ln.setAttribute(\'y1\',p[1]); ln.setAttribute(\'x2\',q[0]); ln.setAttribute(\'y2\',q[1]);'
+          'ln.setAttribute(\'class\',\'mapedge\'); ln.setAttribute(\'data-a\',e.a); ln.setAttribute(\'data-b\',e.b);'
+          'var tt=document.createElementNS(NS,\'title\'); tt.textContent=e.kind; ln.appendChild(tt); svg.appendChild(ln);});'
+          'MAP.nodes.forEach(function(n){var p=pos[n.i]; if(!p){return;}'
+          'var g=document.createElementNS(NS,\'g\'); g.setAttribute(\'class\',\'mapnode\'); g.setAttribute(\'data-i\',n.i);'
+          'var c=document.createElementNS(NS,\'circle\'); c.setAttribute(\'cx\',p[0]); c.setAttribute(\'cy\',p[1]); c.setAttribute(\'r\',13);'
+          'c.setAttribute(\'class\',\'npc \'+n.type); g.appendChild(c);'
+          'var t=document.createElementNS(NS,\'text\'); t.setAttribute(\'x\',p[0]); t.setAttribute(\'y\',p[1]+30);'
+          't.setAttribute(\'text-anchor\',\'middle\'); t.setAttribute(\'class\',\'npt\');'
+          't.textContent=n.label.length>24?n.label.substring(0,23)+\'...\':n.label; g.appendChild(t);'
+          'g.addEventListener(\'click\',function(){mapHi(n.i);}); svg.appendChild(g);});}'
+          'function mapHi(i){'
+          'var cur=document.querySelector(\'.mapnode.sel\'); var was=cur&&cur.getAttribute(\'data-i\')==String(i);'
+          'document.querySelectorAll(\'.mapnode\').forEach(function(g){g.classList.remove(\'sel\');});'
+          'document.querySelectorAll(\'.mapedge\').forEach(function(l){l.classList.remove(\'on\');});'
+          'if(was){return;}'
+          'var g=document.querySelector(\'.mapnode[data-i="\'+i+\'"]\'); if(g){g.classList.add(\'sel\');}'
+          'document.querySelectorAll(\'.mapedge\').forEach(function(l){'
+          'if(l.getAttribute(\'data-a\')==String(i)||l.getAttribute(\'data-b\')==String(i)){l.classList.add(\'on\');}});}'
+          'buildMap(); compShow();'
           '</script>')
 
 
@@ -1772,6 +2027,18 @@ h2 { font-size: 18px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2
 .card.sim-card { background: #eef4fb; border-color: #bcd3ee; margin-top: 12px; }
 .simtitle { font-weight: 700; font-size: 15px; }
 .simnote { font-size: 12.5px; color: #455a64; margin: 4px 0 10px; }
+.compout { margin-top: 10px; font-size: 14px; font-weight: 600; color: #263238; }
+#dommap { width: 100%; height: auto; }
+.mapedge { stroke: #c3ced4; stroke-width: 1.5; }
+.mapedge.on { stroke: #b00020; stroke-width: 3; }
+.npc { fill: #90a4ae; stroke: #fff; stroke-width: 2; }
+.npc.USER { fill: #1e88e5; } .npc.GROUP { fill: #8e24aa; } .npc.DOMAIN { fill: #263238; }
+.mapnode { cursor: pointer; }
+.mapnode.sel circle { stroke: #b00020; stroke-width: 3.5; }
+.npt { font-size: 10.5px; fill: #37474f; }
+.maplegend { font-size: 12px; color: #607d8b; margin-top: 6px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
+.dot.du { background: #1e88e5; } .dot.dg { background: #8e24aa; } .dot.dd { background: #263238; }
 .sevtable { border-collapse: collapse; margin: 10px 0; }
 .sevtable th, .sevtable td { text-align: left; padding: 5px 18px 5px 0; font-size: 14px; }
 .dot-sev { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
