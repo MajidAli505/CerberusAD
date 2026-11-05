@@ -1289,6 +1289,66 @@ for r in fails:
 if not fixplan:
     fixplan = '<p>No findings - nothing in the fix plan.</p>'
 
+_opt_w = {"Critical": 10, "High": 5, "Medium": 2, "Low": 1}
+_targets = {}
+for u in _D.get("users", []):
+    if _cnt.get(u.get("name", ""), 0) > 0:
+        _targets[u.get("name", "")] = "Account"
+for t in _D.get("cert_templates", []):
+    _targets.setdefault(t.get("name", ""), "Template")
+for g in _D.get("gpos", []):
+    _targets.setdefault(g.get("name", ""), "GPO")
+
+def _opt_stats(nm):
+    cleared, shrunk, drop = 0, 0, 0
+    for r in fails:
+        if not r["items"]:
+            continue
+        hits = [nm in it for it in r["items"]]
+        if all(hits):
+            cleared += 1
+            drop += _opt_w.get(r["severity"], 0)
+        elif any(hits):
+            shrunk += 1
+    return cleared, shrunk, drop
+
+_opt_rows = []
+for nm, typ in _targets.items():
+    if not nm:
+        continue
+    c, s, dr = _opt_stats(nm)
+    if c + s == 0:
+        continue
+    paths_blocked = sum(1 for (n, _st) in reaching if n == nm) if typ == "Account" else 0
+    _opt_rows.append((nm, typ, c, s, paths_blocked, dr))
+_opt_rows.sort(key=lambda x: (-x[5], -x[2], -x[3], x[0].lower()))
+_opt_rows = _opt_rows[:8]
+
+optimizer_html = ""
+if _opt_rows:
+    _trs = ""
+    for i, (nm, typ, c, s, pb, dr) in enumerate(_opt_rows, 1):
+        _trs += ('<tr><td>' + str(i) + '</td><td><b>' + esc(nm) + '</b></td><td>' + esc(typ) + '</td><td>' +
+                 str(c) + '</td><td>' + str(s) + '</td><td>' + str(pb) + '</td><td>' + str(dr) + '</td></tr>')
+    _cleared_ids = set()
+    _covered_names = []
+    _rm = score
+    _journey = [str(score)]
+    for (nm, typ, c, s, pb, dr) in _opt_rows:
+        _covered_names.append(nm)
+        for r in fails:
+            if r["id"] in _cleared_ids or not r["items"]:
+                continue
+            if all(any(tn in it for tn in _covered_names) for it in r["items"]):
+                _cleared_ids.add(r["id"])
+                _rm -= _opt_w.get(r["severity"], 0)
+        _journey.append(str(_rm))
+    optimizer_html = ('<p>Each row is one work package: fully remediate that account, template or GPO and this is what it buys you. '
+                      '"Cleared" means the finding disappears completely; "Reduced" means it shrinks but other objects keep it alive.</p>'
+                      '<table class="dtable"><tr><th>#</th><th>Fix this first</th><th>Type</th><th>Findings cleared</th>'
+                      '<th>Findings reduced</th><th>Paths blocked</th><th>Score drop (alone)</th></tr>' + _trs + '</table>'
+                      '<p><b>Projected score if you work in this order:</b> ' + ' &#8594; '.join(_journey) + '</p>')
+
 _reach_names = {n for (n, _s) in reaching}
 _prof_users = [u for u in _D.get("users", []) if u.get("admin_count") == 1 or u.get("name") in _reach_names]
 _prof_users.sort(key=lambda u: -_cnt.get(u.get("name", ""), 0))
@@ -1628,7 +1688,7 @@ tab1 = ('<div id="t1" class="tabpage">'
         '<h2 id="quick">Quick Wins - fix these first (big impact, easy to fix)</h2><div class="card quick-card">' +
         ("".join(finding_html(r) for r in quick) or "<p>None.</p>") + '</div>'
         '<h2>MITRE ATT&amp;CK Coverage</h2>' + mitre_html + '<h2 id="findings">All Findings (worst first)</h2>' + "".join(finding_html(r) for r in fails) +
-        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + (('<h2>Password Policy What-If</h2>' + whatif_html) if whatif_html else '') + '</div>')
+        '<h2 id="fixplan">Fix Plan - do these in this order</h2>' + fixplan + (('<h2>Remediation Roadmap - biggest impact first</h2>' + optimizer_html) if optimizer_html else '') + '<h2 id="profiles">Account Risk Profiles</h2>' + profiles + '<h2>GPO Summary</h2>' + gpo_table + '<h2>AD CS Template Summary</h2>' + cs_table + (('<h2>Password Policy What-If</h2>' + whatif_html) if whatif_html else '') + '</div>')
 
 
 
