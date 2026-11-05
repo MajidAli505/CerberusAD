@@ -120,7 +120,7 @@ for e in search_all(BASE, "(objectClass=domainDNS)",
 cert_templates = []
 for e in search_all(CONFIG, "(objectClass=pKICertificateTemplate)",
                     ["cn", "pKIExtendedKeyUsage", "distinguishedName", "msPKI-Certificate-Name-Flag",
-                     "msPKI-Enrollment-Flag", "msPKI-RA-Signature",
+                     "msPKI-Enrollment-Flag", "msPKI-RA-Signature", "msPKI-Certificate-Policy",
                      "msPKI-Template-Schema-Version", "msPKI-Private-Key-Flag", "msPKI-Minimal-Key-Size"]):
     a = e.get("attributes")
     if a is None:
@@ -135,6 +135,7 @@ for e in search_all(CONFIG, "(objectClass=pKICertificateTemplate)",
         "ra_signature": int(first(a.get("msPKI-RA-Signature")) or 0),
         "schema_version": int(first(a.get("msPKI-Template-Schema-Version")) or 0),
         "min_key_size": int(first(a.get("msPKI-Minimal-Key-Size")) or 0),
+        "cert_policies": as_list(a.get("msPKI-Certificate-Policy")),
     })
 print("Cert Templates:", len(cert_templates))
 
@@ -150,6 +151,24 @@ for e in search_all(CONFIG, "(objectClass=pKIEnrollmentService)",
                 "host": first(a.get("dNSHostName")),
                 "published": as_list(a.get("certificateTemplates"))})
 print("CAs:", len(cas))
+
+
+# ---------- Issuance policy OID links (for ESC13) ----------
+oid_links = []
+for e in search_all(CONFIG, "(objectClass=msPKI-Enterprise-Oid)",
+                    ["cn", "displayName", "msDS-OIDToGroupLink", "distinguishedName"]):
+    a = e.get("attributes")
+    if a is None:
+        continue
+    link = first(a.get("msDS-OIDToGroupLink"))
+    if link:
+        oid_links.append({
+            "oid": first(a.get("cn")),
+            "name": first(a.get("displayName")) or "",
+            "group_dn": link,
+            "dn": first(a.get("distinguishedName")),
+        })
+print("OID group links:", len(oid_links))
 
 
 # ---------- OUs ----------
@@ -248,7 +267,7 @@ users = []
 for e in search_all(BASE, "(&(objectClass=user)(objectCategory=person))",
         ["sAMAccountName", "msDS-KeyCredentialLink", "objectSid", "ms-DS-ConsistencyGuid", "distinguishedName", "userAccountControl", "pwdLastSet",
          "lastLogonTimestamp", "servicePrincipalName", "adminCount", "sIDHistory",
-         "memberOf", "msDS-AllowedToDelegateTo", "description", "msDS-SupportedEncryptionTypes", "userPrincipalName", "whenCreated"]):
+         "memberOf", "msDS-AllowedToDelegateTo", "description", "msDS-SupportedEncryptionTypes", "userPrincipalName", "whenCreated", "altSecurityIdentities"]):
     a = e.get("attributes")
     if a is None:
         continue
@@ -271,6 +290,7 @@ for e in search_all(BASE, "(&(objectClass=user)(objectCategory=person))",
     "admin_count": int(first(a.get("adminCount")) or 0),
     "dn": first(a.get("distinguishedName")),
     "member_of": as_list(a.get("memberOf")),
+    "alt_sec_identities": as_list(a.get("altSecurityIdentities")),
 })
 print("Users:", len(users))
 
@@ -314,8 +334,8 @@ else:
 # ---------- Computers ----------
 computers = []
 for e in search_all(BASE, "(objectClass=computer)",
-        ["sAMAccountName", "objectSid", "distinguishedName", "pwdLastSet", "msDS-AllowedToDelegateTo", 
-         "operatingSystem", "description", "msDS-SupportedEncryptionTypes", "userAccountControl", "lastLogonTimestamp"]):
+        ["sAMAccountName", "objectSid", "distinguishedName", "pwdLastSet", "msDS-AllowedToDelegateTo",
+         "operatingSystem", "description", "msDS-SupportedEncryptionTypes", "userAccountControl", "lastLogonTimestamp", "altSecurityIdentities"]):
     a = e.get("attributes")
     if a is None:
         continue
@@ -332,6 +352,7 @@ for e in search_all(BASE, "(objectClass=computer)",
         "os": first(a.get("operatingSystem")),
         "is_dc": has_flag(uac, 0x2000),
         "last_logon": str(filetime(a.get("lastLogonTimestamp"))),
+        "alt_sec_identities": as_list(a.get("altSecurityIdentities")),
     })
 print("Computers:", len(computers))
 
@@ -558,7 +579,7 @@ print("GPO content read:", len(gpo_content), "of", len(gpos))
 # ---------- Save ----------
 data = {"domain": domain, "gpo_content": gpo_content, "users": users, "user_acls": user_acls, "group_acls": group_acls, "template_acls": template_acls, "ca_acls": ca_acls, "print_queues": print_queues, "gmsa": gmsa, "forest_fl": forest_fl, "groups": groups, "ous": ous, "gpos": gpos, "trusts": trusts,
         "computers": computers, "anon_bind": anon_bind, "cert_templates": cert_templates, "cas": cas, "psos": psos,
-        "sites": sites, "subnets": subnets, "fsmo": fsmo, "recycle_bin_enabled": recycle_bin_enabled, 
+        "oid_links": oid_links, "sites": sites, "subnets": subnets, "fsmo": fsmo, "recycle_bin_enabled": recycle_bin_enabled,
         "tombstone_days": tombstone_days, "gpo_acls": gpo_acls, "domain_acl": domain_acl, "adminsdholder_acl": adminsdholder_acl, "laps_schema": laps_schema}
 with open("collected.json", "w") as f:
     json.dump(data, f, indent=1, default=str)

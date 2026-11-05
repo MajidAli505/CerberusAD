@@ -485,6 +485,34 @@ def check_esc15(d):
     return [t["name"] for t in d.get("cert_templates", [])
             if t["name"] in pub and t.get("schema_version") == 1 and (t["name_flag"] & 1)]
 
+def check_esc13(d):
+    # ESC13: a published client-auth template whose issuance policy is linked
+    # to a Tier-Zero group. Only an exact OID + group match fails this check;
+    # a policy that cannot be resolved to a group never fails it.
+    pub = published_names(d)
+    groups_by_dn = {g.get("dn"): g for g in d.get("groups", [])}
+    links = {}
+    for o in d.get("oid_links", []):
+        g = groups_by_dn.get(o.get("group_dn", ""))
+        if g and (g.get("sid") or "").rsplit("-", 1)[-1] in ("512", "518", "519"):
+            links[o.get("oid", "")] = g.get("name", "")
+    bad = []
+    for t in d.get("cert_templates", []):
+        if t["name"] in pub and has_client_auth(t):
+            for pol in t.get("cert_policies", []):
+                if pol in links:
+                    bad.append(t["name"] + " (issuance policy linked to " + links[pol] + ")")
+                    break
+    return bad
+
+def check_esc14(d):
+    # ESC14: explicit certificate mappings (altSecurityIdentities) sitting on
+    # a privileged account or a Domain Controller - a stale or weak mapping
+    # there is a logon path that bypasses the account's password.
+    bad = [u["name"] + " (user)" for u in d.get("users", []) if is_priv(u) and u.get("alt_sec_identities")]
+    bad += [c["name"] + " (DC computer)" for c in d.get("computers", []) if c.get("is_dc") and c.get("alt_sec_identities")]
+    return bad
+
 def check_published_no_approval(d):
     pub = published_names(d)
     return [t["name"] for t in d.get("cert_templates", [])
@@ -1038,6 +1066,8 @@ CHECKS = [
     ("CS-20",   "Published Code-Signing Templates",  "Medium", lambda d: [t["name"] for t in d.get("cert_templates", []) if t["name"] in published_names(d) and "1.3.6.1.5.5.7.3.3" in t.get("eku", [])]),
     ("CS-21",   "ESC9 Templates (No Security Extension)", "High",   check_esc9),
     ("CS-22",   "ESC15 Schema V1 Templates (EKUwu)",      "High",   check_esc15),
+    ("CS-23",   "ESC13 Issuance Policy Linked to Tier-Zero Group", "Critical", check_esc13),
+    ("CS-24",   "ESC14 Certificate Mappings on Privileged Accounts", "High",   check_esc14),
     ("POL-17",  "Anonymous LDAP Bind Allowed",       "Medium", lambda d: ["The directory can be read without logging in"] if d.get("anon_bind") else []),
     ("POL-18",  "Disabled GPO Links",                "Info",   check_disabled_links),
     ("HYB-08",  "Privileged Accounts With Non-Routable UPN", "Medium", lambda d: [u["name"] for u in d["users"] if is_priv(u) and u.get("upn") and u["upn"].lower().endswith(".local")]),
@@ -1131,6 +1161,8 @@ MITRE_MAP = {
  "CS-19": ("T1649 Steal or Forge Authentication Certificates", None),
  "CS-21": ("T1649 Steal or Forge Authentication Certificates", None),
  "CS-22": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-23": ("T1649 Steal or Forge Authentication Certificates", None),
+ "CS-24": ("T1649 Steal or Forge Authentication Certificates", None),
 }
 
 
@@ -1233,21 +1265,29 @@ FIXES = {
              "Re-run the scan - CS-21 should PASS."),
  "CS-22": ("Retire the schema v1 template: duplicate it as a schema version 2 (or higher) template, publish the new one, and unpublish the v1 original. If it must stay, turn off 'Supply in the request' on it.",
              "Re-run the scan - CS-22 should PASS."),
+ "CS-23": ("Remove the group link from the issuance policy (clear msDS-OIDToGroupLink on the policy's OID object), or point the policy at a non-privileged group instead. Until that is done, unpublish the template.",
+             "Re-run the scan - CS-23 should PASS."),
+ "CS-24": ("Review every altSecurityIdentities mapping on these accounts. Remove the ones that are not actively needed, and replace weak issuer/subject mappings with strong ones (subject key identifier, or the certificate SHA-1 hash).",
+             "Re-run the scan - CS-24 should PASS, or list only mappings you have reviewed and accepted."),
 }
 
 fixplan = ""
 _step = 0
 for r in fails:
+    _step += 1
     if r["id"] in FIXES:
-        _step += 1
         _fix, _verify = FIXES[r["id"]]
-        fixplan += ('<div class="finding fl-' + r["severity"].lower() + '"><div class="fhead"><span class="sev ' +
-                    r["severity"].lower() + '">' + esc(r["severity"]) + '</span><span class="fid">Step ' + str(_step) +
-                    ' &middot; ' + esc(r["id"]) + '</span><span class="ftitle">' + esc(r["title"]) + '</span></div>'
-                    '<div class="rf"><span class="tag fix">Fix</span> ' + esc(_fix) + '</div>'
-                    '<div class="rf"><span class="tag verify">Verify</span> ' + esc(_verify) + '</div></div>')
+    else:
+        _fix = ("Generic fix - review the accounts, groups, settings or templates listed in this finding, "
+                "remove or correct the risky setting shown, and document any account that must legitimately stay.")
+        _verify = "Re-run the scan - " + r["id"] + " should PASS, or shrink to only the accounts you deliberately kept and documented."
+    fixplan += ('<div class="finding fl-' + r["severity"].lower() + '"><div class="fhead"><span class="sev ' +
+                r["severity"].lower() + '">' + esc(r["severity"]) + '</span><span class="fid">Step ' + str(_step) +
+                ' &middot; ' + esc(r["id"]) + '</span><span class="ftitle">' + esc(r["title"]) + '</span></div>'
+                '<div class="rf"><span class="tag fix">Fix</span> ' + esc(_fix) + '</div>'
+                '<div class="rf"><span class="tag verify">Verify</span> ' + esc(_verify) + '</div></div>')
 if not fixplan:
-    fixplan = '<p>No Critical or High findings - nothing in the fix plan.</p>'
+    fixplan = '<p>No findings - nothing in the fix plan.</p>'
 
 _reach_names = {n for (n, _s) in reaching}
 _prof_users = [u for u in _D.get("users", []) if u.get("admin_count") == 1 or u.get("name") in _reach_names]
