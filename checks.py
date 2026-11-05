@@ -1532,6 +1532,13 @@ summary += ('<p><b>Top risks</b></p><ul>' +
             "".join('<li><b>' + esc(r["id"]) + '</b> ' + esc(r["title"]) + ' (' + esc(r["severity"]) + ')</li>' for r in fails[:5]) +
             '</ul>')
 
+_step_key_ids = {}
+def step_key(frm, kind, to):
+    k = (frm, kind, to)
+    if k not in _step_key_ids:
+        _step_key_ids[k] = "k" + str(len(_step_key_ids))
+    return _step_key_ids[k]
+
 def step_cards_html(idx, steps):
     out = ""
     for j, (frm, kind, to, text, risk, fix) in enumerate(steps, 1):
@@ -1539,8 +1546,8 @@ def step_cards_html(idx, steps):
                 esc(KIND_LABELS.get(kind, kind)) + '</div><b>' + esc(text) + '.</b>'
                 '<div class="rf"><span class="tag risk">Risk</span> ' + esc(risk) + '</div>'
                 '<div class="rf"><span class="tag fix">Fix</span> ' + esc(fix) + '</div>'
-                '<label class="fixrow"><input type="checkbox" class="fixbox" onchange="updProgress(' +
-                str(idx) + ')"> Fixed</label></div>')
+                '<label class="fixrow"><input type="checkbox" class="fixbox" data-key="' +
+                step_key(frm, kind, to) + '" onchange="fixChanged(this)"> Fixed</label></div>')
     return out
 
 side_items = ""
@@ -1558,6 +1565,39 @@ for i, (n, steps) in enumerate(reaching):
                '<div class="progtxt" id="pt' + str(i) + '">Fix progress: 0 of ' + str(len(steps)) + '</div>' +
                step_cards_html(i, steps) + '</div>')
 
+SIM_KIND_FINDINGS = {"Replication": ["PRIV-18"], "ESC1": ["CS-11"]}
+_sev_w = {"Critical": 10, "High": 5, "Medium": 2, "Low": 1}
+_fail_w = {r["id"]: _sev_w.get(r["severity"], 0) for r in fails}
+_sim_chains = []
+_sim_step_findings = {}
+for (n, steps) in reaching:
+    _keys = []
+    for (frm, kind, to, _t, _r, _f) in steps:
+        _k = step_key(frm, kind, to)
+        _keys.append(_k)
+        _fids = list(SIM_KIND_FINDINGS.get(kind, []))
+        if kind in ("ChangeMembers", "FullControl") and node_type(to) == "GROUP":
+            _fids.append("PRIV-29")
+        for _fid in _fids:
+            if _fid in _fail_w:
+                _sim_step_findings.setdefault(_k, []).append(_fid)
+    _sim_chains.append({"start": n, "keys": _keys})
+sim_json = json.dumps({"base": score, "chains": _sim_chains,
+                       "stepFindings": _sim_step_findings, "weights": _fail_w})
+
+if reaching:
+    sim_html = ('<div class="card sim-card"><div class="simtitle">Fix Simulator</div>'
+                '<p class="simnote">Tick <b>Fixed</b> on any step in the Path Explorer below and watch the effect - no re-scan needed. '
+                'A path counts as blocked as soon as one of its steps is fixed. The projected score only counts the findings a step on this tab '
+                'provably belongs to (PRIV-18, CS-11, PRIV-29). Direct group memberships are removed in Active Directory and show up on the next scan.</p>'
+                '<div class="kpis">'
+                '<div class="kpi"><div class="num red" id="simReach">' + str(len(reaching)) + '</div><div class="lbl">Accounts can still reach DA</div></div>'
+                '<div class="kpi"><div class="num orange" id="simPaths">' + str(len(reaching)) + '</div><div class="lbl">Open paths</div></div>'
+                '<div class="kpi"><div class="num" id="simScore">' + str(score) + '</div><div class="lbl">Projected risk score</div></div>'
+                '</div></div>')
+else:
+    sim_html = ""
+
 sf_options = '<option value="ALL">All accounts</option>' + "".join(
     '<option value="' + esc(n) + '">' + esc(n) + '</option>' for (n, _s) in reaching)
 
@@ -1571,7 +1611,7 @@ if reaching:
 else:
     explorer = '<div class="card"><p>No account outside the admin groups can reach Domain Admin through the permissions collected.</p></div>'
 
-tab2 = ('<h2 style="margin-top:6px">Privilege Paths</h2>' + tab2_kpis + cut_html +
+tab2 = ('<h2 style="margin-top:6px">Privilege Paths</h2>' + tab2_kpis + cut_html + sim_html +
         '<h3 class="subh">Tier Zero - already at Domain Admin level (' + str(len(already_priv)) + ')</h3>' + tierzero +
         '<h3 class="subh">Path Explorer</h3>' + explorer)
 
@@ -1619,6 +1659,28 @@ script = ('<script>function showTab(id, btn){'
           'var pct=boxes.length?Math.round(100*done/boxes.length):0;'
           'document.getElementById(\'pb\'+i).style.width=pct+\'%\';'
           'document.getElementById(\'pt\'+i).textContent=\'Fix progress: \'+done+\' of \'+boxes.length+(done===boxes.length&&boxes.length>0?\' - chain closed\':\'\');}'
+          'var SIM=' + sim_json + ';'
+          'function fixChanged(el){'
+          'var k=el.getAttribute(\'data-key\');'
+          'document.querySelectorAll(\'.fixbox\').forEach(function(b){if(b.getAttribute(\'data-key\')===k){b.checked=el.checked;}});'
+          'document.querySelectorAll(\'.chainpanel\').forEach(function(p){updProgress(p.id.substring(2));});'
+          'simRecalc();}'
+          'function simRecalc(){'
+          'if(!SIM||!SIM.chains||!document.getElementById(\'simReach\')){return;}'
+          'var checked={};'
+          'document.querySelectorAll(\'.fixbox\').forEach(function(b){if(b.checked){checked[b.getAttribute(\'data-key\')]=true;}});'
+          'var openPaths=0; var reach={};'
+          'SIM.chains.forEach(function(c){var blocked=false;'
+          'c.keys.forEach(function(k){if(checked[k]){blocked=true;}});'
+          'if(!blocked){openPaths++; reach[c.start]=true;}});'
+          'var byFinding={};'
+          'Object.keys(SIM.stepFindings).forEach(function(k){SIM.stepFindings[k].forEach(function(f){(byFinding[f]=byFinding[f]||[]).push(k);});});'
+          'var saved=0;'
+          'Object.keys(byFinding).forEach(function(f){var ks=byFinding[f];'
+          'if(ks.length>0&&ks.every(function(k){return checked[k];})){saved+=(SIM.weights[f]||0);}});'
+          'document.getElementById(\'simReach\').textContent=Object.keys(reach).length;'
+          'document.getElementById(\'simPaths\').textContent=openPaths;'
+          'document.getElementById(\'simScore\').textContent=SIM.base-saved;}'
           '</script>')
 
 
@@ -1647,6 +1709,9 @@ h2 { font-size: 18px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2
 .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; padding: 16px 18px; }
 .card.quick-card { background: #eef7ee; border-color: #b9dcb9; }
 .card.cut-card { background: #fff8e1; border-color: #ffe082; margin-top: 12px; }
+.card.sim-card { background: #eef4fb; border-color: #bcd3ee; margin-top: 12px; }
+.simtitle { font-weight: 700; font-size: 15px; }
+.simnote { font-size: 12.5px; color: #455a64; margin: 4px 0 10px; }
 .sevtable { border-collapse: collapse; margin: 10px 0; }
 .sevtable th, .sevtable td { text-align: left; padding: 5px 18px 5px 0; font-size: 14px; }
 .dot-sev { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
