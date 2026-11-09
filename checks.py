@@ -1189,9 +1189,9 @@ quick = [r for r in fails if r["id"] in QUICK_WINS]
 
 try:
     from paths import find_reachability
-    already_priv, reaching = find_reachability(_D)
+    already_priv, reaching, all_paths = find_reachability(_D)
 except Exception:
-    already_priv, reaching = [], []
+    already_priv, reaching, all_paths = [], [], {}
     print("Note: reachability data not found (paths.py)")
 
 _cnt = _Counter()
@@ -1319,7 +1319,7 @@ for nm, typ in _targets.items():
     c, s, dr = _opt_stats(nm)
     if c + s == 0:
         continue
-    paths_blocked = sum(1 for (n, _st) in reaching if n == nm) if typ == "Account" else 0
+    paths_blocked = len(all_paths.get(nm, [])) if typ == "Account" else 0
     _opt_rows.append((nm, typ, c, s, paths_blocked, dr))
 _opt_rows.sort(key=lambda x: (-x[5], -x[2], -x[3], x[0].lower()))
 _opt_rows = _opt_rows[:8]
@@ -1584,7 +1584,9 @@ with open("detection_pack.md", "w", encoding="utf-8") as fh:
 KIND_LABELS = {"MemberOf": "member of", "ResetPassword": "can reset password",
                "FullControl": "full control", "ChangeMembers": "can change members",
                "Replication": "replication rights", "GPOEdit": "can edit GPO",
-               "ESC1": "ESC1 enrollment"}
+               "ESC1": "ESC1 enrollment", "ESC2": "ESC2 enrollment",
+               "SIDHistory": "SID history", "Delegation": "delegation to a DC",
+               "DCControl": "domain controller"}
 _user_names = {u.get("name") for u in _D.get("users", [])}
 _group_names = {g.get("name") for g in _D.get("groups", [])}
 
@@ -1616,17 +1618,19 @@ def steps_table_html(steps):
                  esc(frm) + ' &#8594; ' + esc(to) + '</td><td>' + esc(risk) + '</td><td>' + esc(fix) + '</td></tr>')
     return ('<table class="ptable"><tr><th>Step</th><th>Permission</th><th>Risk</th><th>Fix</th></tr>' + rows + '</table>')
 
+_total_paths = sum(len(v) for v in all_paths.values())
 _cut = _Counter()
-for (_n, _steps) in reaching:
-    for _k in {s[1] for s in _steps}:
-        _cut[_k] += 1
+for (_n, _paths) in all_paths.items():
+    for _p in _paths:
+        for _k in {s[1] for s in _p}:
+            _cut[_k] += 1
 cut_html = ""
 if reaching and _cut:
     _top_kind, _top_n = _cut.most_common(1)[0]
-    _pct = round(100 * _top_n / len(reaching))
+    _pct = round(100 * _top_n / max(_total_paths, 1))
     cut_html = ('<div class="card cut-card"><b>Cut these first:</b> the permission creating the most paths is <b>' +
                 esc(KIND_LABELS.get(_top_kind, _top_kind)) + '</b> - it appears in ' + str(_top_n) + ' of ' +
-                str(len(reaching)) + ' chains (' + str(_pct) + '%). Fixing it removes those chains at once.</div>')
+                str(_total_paths) + ' paths (' + str(_pct) + '%). Fixing it removes those paths at once.</div>')
 
 _groups_by_dn = {g.get("dn"): g for g in _D.get("groups", [])}
 _users_by_name = {u.get("name"): u for u in _D.get("users", [])}
@@ -1649,17 +1653,18 @@ tierzero = '<div class="card">' + (tz or '<p>None.</p>') + '</div>'
 ov_rows = ""
 for (n, steps) in reaching:
     psev = "Critical" if len(steps) <= 1 else "High" if len(steps) == 2 else "Medium"
-    ov_rows += ('<tr><td><b>' + esc(n) + '</b></td><td>' + str(len(steps)) + '</td><td>' +
+    ov_rows += ('<tr><td><b>' + esc(n) + '</b></td><td>' + str(len(all_paths.get(n, []))) + '</td><td>' + str(len(steps)) + '</td><td>' +
                 esc(KIND_LABELS.get(steps[-1][1], steps[-1][1])) + '</td><td><span class="sev ' +
                 psev.lower() + '">' + psev + '</span></td></tr>')
-overview = ('<table class="ptable"><tr><th>Account</th><th>Steps to DA</th><th>Final permission</th><th>Path severity</th></tr>' +
+overview = ('<table class="ptable"><tr><th>Account</th><th>Paths</th><th>Shortest (steps)</th><th>Final permission</th><th>Path severity</th></tr>' +
             ov_rows + '</table>') if reaching else '<p>No account can reach Domain Admin.</p>'
 
 _lens = [len(s) for (_n, s) in reaching]
+_all_lens = [len(p) for v in all_paths.values() for p in v]
 tab2_kpis = ('<div class="kpis">'
-             '<div class="kpi"><div class="num red">' + str(len(reaching)) + '</div><div class="lbl">Paths to DA</div></div>'
-             '<div class="kpi"><div class="num">' + str(min(_lens) if _lens else 0) + '</div><div class="lbl">Shortest chain</div></div>'
-             '<div class="kpi"><div class="num">' + str(max(_lens) if _lens else 0) + '</div><div class="lbl">Longest chain</div></div>'
+             '<div class="kpi"><div class="num red">' + str(_total_paths) + '</div><div class="lbl">Paths to DA</div></div>'
+             '<div class="kpi"><div class="num">' + str(min(_lens) if _lens else 0) + '</div><div class="lbl">Shortest path</div></div>'
+             '<div class="kpi"><div class="num">' + str(max(_all_lens) if _all_lens else 0) + '</div><div class="lbl">Longest path</div></div>'
              '<div class="kpi"><div class="num orange">' + str(len(already_priv)) + '</div><div class="lbl">Already privileged</div></div></div>')
 
 
@@ -1710,35 +1715,48 @@ def step_cards_html(idx, steps):
 side_items = ""
 panels = ""
 for i, (n, steps) in enumerate(reaching):
+    _paths = all_paths.get(n, [steps])
     psev = "Critical" if len(steps) <= 1 else "High" if len(steps) == 2 else "Medium"
     side_items += ('<button class="sideitem' + (' active' if i == 0 else '') + '" data-name="' + esc(n) +
                    '" data-idx="' + str(i) + '" onclick="showChain(' + str(i) + ', this)"><b>' + esc(n) +
-                   '</b> &#8594; DA &middot; ' + str(len(steps)) + ' step(s) &middot; ' +
+                   '</b> &#8594; DA &middot; ' + str(len(steps)) + ' step(s)' +
+                   (' &middot; ' + str(len(_paths)) + ' paths' if len(_paths) > 1 else '') + ' &middot; ' +
                    '<span class="sev ' + psev.lower() + '">' + psev + '</span></button>')
+    _chips = ""
+    if len(_paths) > 1:
+        _chips = ('<div class="pathchips">' + "".join(
+            '<button class="pathchip' + (' active' if j == 0 else '') + '" onclick="showPath(' + str(i) + ', ' + str(j) +
+            ', this)">Path ' + str(j + 1) + ' &middot; ' + str(len(p)) + ' step(s)</button>'
+            for j, p in enumerate(_paths)) + '</div>')
+    _pdivs = ""
+    for j, p in enumerate(_paths):
+        _pdivs += ('<div class="pathdiv" id="pd' + str(i) + '_' + str(j) + '"' + ('' if j == 0 else ' style="display:none"') +
+                   '>' + diagram_html(p) +
+                   '<div class="progwrap"><div class="progbar"></div></div>' +
+                   '<div class="progtxt">Fix progress: 0 of ' + str(len(p)) + '</div>' +
+                   step_cards_html(i, p) + '</div>')
     panels += ('<div class="chainpanel" id="cp' + str(i) + '"' + ('' if i == 0 else ' style="display:none"') +
-               '><div class="chain-head"><b>' + esc(n) + '</b> can reach Domain Admin in ' + str(len(steps)) +
-               ' step(s)</div>' + diagram_html(steps) +
-               '<div class="progwrap"><div class="progbar" id="pb' + str(i) + '"></div></div>' +
-               '<div class="progtxt" id="pt' + str(i) + '">Fix progress: 0 of ' + str(len(steps)) + '</div>' +
-               step_cards_html(i, steps) + '</div>')
+               '><div class="chain-head"><b>' + esc(n) + '</b> can reach Domain Admin - ' + str(len(_paths)) +
+               ' path(s), shortest ' + str(len(steps)) + ' step(s)</div>' + _chips + _pdivs + '</div>')
 
-SIM_KIND_FINDINGS = {"Replication": ["PRIV-18"], "ESC1": ["CS-11"]}
+SIM_KIND_FINDINGS = {"Replication": ["PRIV-18"], "ESC1": ["CS-11"], "ESC2": ["CS-04"]}
 _sev_w = {"Critical": 10, "High": 5, "Medium": 2, "Low": 1}
 _fail_w = {r["id"]: _sev_w.get(r["severity"], 0) for r in fails}
 _sim_chains = []
 _sim_step_findings = {}
-for (n, steps) in reaching:
-    _keys = []
-    for (frm, kind, to, _t, _r, _f) in steps:
-        _k = step_key(frm, kind, to)
-        _keys.append(_k)
-        _fids = list(SIM_KIND_FINDINGS.get(kind, []))
-        if kind in ("ChangeMembers", "FullControl") and node_type(to) == "GROUP":
-            _fids.append("PRIV-29")
-        for _fid in _fids:
-            if _fid in _fail_w:
-                _sim_step_findings.setdefault(_k, []).append(_fid)
-    _sim_chains.append({"start": n, "keys": _keys})
+for (n, _paths) in all_paths.items():
+    for steps in _paths:
+        _keys = []
+        for (frm, kind, to, _t, _r, _f) in steps:
+            _k = step_key(frm, kind, to)
+            _keys.append(_k)
+            _fids = list(SIM_KIND_FINDINGS.get(kind, []))
+            if kind in ("ChangeMembers", "FullControl") and node_type(to) == "GROUP":
+                _fids.append("PRIV-29")
+            for _fid in _fids:
+                if _fid in _fail_w:
+                    _sim_step_findings.setdefault(_k, []).append(_fid)
+        _sim_chains.append({"start": n, "keys": _keys})
 sim_json = json.dumps({"base": score, "chains": _sim_chains,
                        "stepFindings": _sim_step_findings, "weights": _fail_w})
 
@@ -1746,10 +1764,10 @@ if reaching:
     sim_html = ('<div class="card sim-card"><div class="simtitle">Fix Simulator</div>'
                 '<p class="simnote">Tick <b>Fixed</b> on any step in the Path Explorer below and watch the effect - no re-scan needed. '
                 'A path counts as blocked as soon as one of its steps is fixed. The projected score only counts the findings a step on this tab '
-                'provably belongs to (PRIV-18, CS-11, PRIV-29). Direct group memberships are removed in Active Directory and show up on the next scan.</p>'
+                'provably belongs to (PRIV-18, CS-11, CS-04, PRIV-29). Direct group memberships are removed in Active Directory and show up on the next scan.</p>'
                 '<div class="kpis">'
                 '<div class="kpi"><div class="num red" id="simReach">' + str(len(reaching)) + '</div><div class="lbl">Accounts can still reach DA</div></div>'
-                '<div class="kpi"><div class="num orange" id="simPaths">' + str(len(reaching)) + '</div><div class="lbl">Open paths</div></div>'
+                '<div class="kpi"><div class="num orange" id="simPaths">' + str(_total_paths) + '</div><div class="lbl">Open paths</div></div>'
                 '<div class="kpi"><div class="num" id="simScore">' + str(score) + '</div><div class="lbl">Projected risk score</div></div>'
                 '</div></div>')
 else:
@@ -1767,11 +1785,12 @@ for _g in _D.get("groups", []):
             _parents.setdefault(_cn, set()).add(_g.get("name"))
 _step_edges = {}
 _domain_labels = set()
-for (_n, _steps) in reaching:
-    for (_frm, _kind, _to, _t, _r, _f) in _steps:
-        _step_edges.setdefault(_frm, set()).add(_to)
-        if str(_to).startswith("the domain"):
-            _domain_labels.add(_to)
+for (_n, _paths) in all_paths.items():
+    for _steps in _paths:
+        for (_frm, _kind, _to, _t, _r, _f) in _steps:
+            _step_edges.setdefault(_frm, set()).add(_to)
+            if str(_to).startswith("the domain"):
+                _domain_labels.add(_to)
 _tz_names = {g.get("name") for g in _D.get("groups", [])
              if str(g.get("sid", "")).rsplit("-", 1)[-1] in ("512", "518", "519")}
 _reach_map = {n: len(s) for (n, s) in reaching}
@@ -1830,7 +1849,8 @@ _mnodes = {}
 def _madd(lbl):
     if lbl not in _mnodes:
         _mnodes[lbl] = node_type(lbl)
-for (_n, _steps) in sorted(reaching, key=lambda x: len(x[1]))[:25]:
+_flat_paths = sorted([p for v in all_paths.values() for p in v], key=len)[:25]
+for _steps in _flat_paths:
     for (_frm, _kind, _to, _t, _r, _f) in _steps:
         _med[(_frm, _to)] = _kind
         _madd(_frm)
@@ -1877,7 +1897,7 @@ if reaching:
                 '<input id="chainSearch" class="sbox" type="text" placeholder="Search account..." onkeyup="filterChains()">'
                 '<select id="startFrom" class="sbox" onchange="filterChains()">' + sf_options + '</select>' +
                 side_items +
-                '<div class="sidenote">Click a chain to see its diagram, risks and fixes. Tick Fixed as you remediate - the progress bar shows how close that chain is to closed.</div>'
+                '<div class="sidenote">Click an account to see every path it has to Domain Admin - use the Path buttons to switch between them. Tick Fixed as you remediate; the Fix Simulator above updates live.</div>'
                 '</div><div class="mainpanel">' + panels + '</div></div>')
 else:
     explorer = '<div class="card"><p>No account outside the admin groups can reach Domain Admin through the permissions collected.</p></div>'
@@ -1924,19 +1944,25 @@ script = ('<script>function showTab(id, btn){'
           'var ok=(nm.indexOf(q)>=0)&&((sf===\'ALL\')||(nm===sf.toLowerCase()));'
           'b.style.display=ok?\'block\':\'none\'; if(ok&&first<0){first=b.getAttribute(\'data-idx\');}});'
           'if(first>=0){showChain(first, document.querySelector(\'.sideitem[data-idx="\'+first+\'"]\'));}}'
-          'function updProgress(i){'
-          'var panel=document.getElementById(\'cp\'+i); var boxes=panel.querySelectorAll(\'.fixbox\');'
-          'var done=0; boxes.forEach(function(b){if(b.checked){done++;}});'
+          'function updProgressDiv(d){'
+          'var boxes=d.querySelectorAll(\'.fixbox\'); var done=0;'
+          'boxes.forEach(function(b){if(b.checked){done++;}});'
           'var pct=boxes.length?Math.round(100*done/boxes.length):0;'
-          'document.getElementById(\'pb\'+i).style.width=pct+\'%\';'
-          'document.getElementById(\'pt\'+i).textContent=\'Fix progress: \'+done+\' of \'+boxes.length+(done===boxes.length&&boxes.length>0?\' - chain closed\':\'\');}'
+          'var bar=d.querySelector(\'.progbar\'); if(bar){bar.style.width=pct+\'%\';}'
+          'var txt=d.querySelector(\'.progtxt\'); if(txt){txt.textContent=\'Fix progress: \'+done+\' of \'+boxes.length+(done===boxes.length&&boxes.length>0?\' - path closed\':\'\');}}'
+          'function showPath(i, j, el){'
+          'var panel=document.getElementById(\'cp\'+i); if(!panel){return;}'
+          'panel.querySelectorAll(\'.pathdiv\').forEach(function(d){d.style.display=\'none\';});'
+          'var d=document.getElementById(\'pd\'+i+\'_\'+j); if(d){d.style.display=\'block\';}'
+          'panel.querySelectorAll(\'.pathchip\').forEach(function(c){c.classList.remove(\'active\');});'
+          'if(el){el.classList.add(\'active\');}}'
           'var SIM=' + sim_json + ';'
           'var COMP=' + comp_json + ';'
           'var MAP=' + map_json + ';'
           'function fixChanged(el){'
           'var k=el.getAttribute(\'data-key\');'
           'document.querySelectorAll(\'.fixbox\').forEach(function(b){if(b.getAttribute(\'data-key\')===k){b.checked=el.checked;}});'
-          'document.querySelectorAll(\'.chainpanel\').forEach(function(p){updProgress(p.id.substring(2));});'
+          'document.querySelectorAll(\'.pathdiv\').forEach(function(d){updProgressDiv(d);});'
           'simRecalc();}'
           'function simRecalc(){'
           'if(!SIM||!SIM.chains||!document.getElementById(\'simReach\')){return;}'
@@ -2028,6 +2054,9 @@ h2 { font-size: 18px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2
 .simtitle { font-weight: 700; font-size: 15px; }
 .simnote { font-size: 12.5px; color: #455a64; margin: 4px 0 10px; }
 .compout { margin-top: 10px; font-size: 14px; font-weight: 600; color: #263238; }
+.pathchips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 4px; }
+.pathchip { border: 1px solid #b0bec5; background: #fff; border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; color: #37474f; }
+.pathchip.active { background: #263238; color: #fff; border-color: #263238; }
 #dommap { width: 100%; height: auto; }
 .mapedge { stroke: #c3ced4; stroke-width: 1.5; }
 .mapedge.on { stroke: #b00020; stroke-width: 3; }
@@ -2095,7 +2124,7 @@ h2 { font-size: 18px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2
 .folded { font-size: 12px; color: #607d8b; }
 
 
-@media print { body { background: #fff; } .tabbar { display: none; } .tabpage { display: block !important; } .explorer { display: block; } .side { display: none; } .chainpanel { display: block !important; margin-bottom: 12px; } .finding, .card, .chain, .kpi { break-inside: avoid; } }
+@media print { body { background: #fff; } .tabbar { display: none; } .tabpage { display: block !important; } .explorer { display: block; } .side { display: none; } .chainpanel { display: block !important; margin-bottom: 12px; } .pathdiv { display: block !important; } .pathchips { display: none; } .finding, .card, .chain, .kpi { break-inside: avoid; } }
 </style></head><body><div class="wrap">
 """ + header + kpis + tabbar + tab1 + tab2page + """
 <p class="foot">Generated from collected domain data. Counts are computed from the scan results, not typed by hand.</p>
