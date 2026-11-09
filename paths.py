@@ -34,7 +34,7 @@ def rid(sid):
         return -1
 
 
-def find_reachability(d):
+def find_reachability(d, extra_targets=None):
     users  = {u["dn"]: u for u in d.get("users", [])  if u.get("dn")}
     groups = {g["dn"]: g for g in d.get("groups", []) if g.get("dn")}
     comps  = {c["dn"]: c for c in d.get("computers", []) if c.get("dn")}
@@ -56,6 +56,11 @@ def find_reachability(d):
     # Targets: Domain / Enterprise / Schema Admins + DOMAIN node
     targets = {dn for dn, g in groups.items() if rid(g.get("sid")) in (512, 518, 519)}
     targets.add(DOMAIN)
+    tier0_targets = set(targets)
+    if extra_targets:
+        # BloodHound-style widened run: privileged groups count as targets
+        # too, so paths that end at an admin group are reported, not hidden.
+        targets |= set(extra_targets)
 
     # Trusted trustees: their rights are not a risk (admins themselves, SYSTEM, DCs)
     legit = {"S-1-5-18", "S-1-3-0", "S-1-5-10", "S-1-5-9", "S-1-5-32-544"}
@@ -283,7 +288,14 @@ def find_reachability(d):
     # --- 9) Delegation to a Domain Controller, and DCs themselves ---
     comp_by_name = {}
     for dn, c in comps.items():
-        comp_by_name.setdefault(str(c.get("name", "")).lower(), dn)
+        _nm = str(c.get("name", "")).lower()
+        comp_by_name.setdefault(_nm, dn)
+        comp_by_name.setdefault(_nm.rstrip("$"), dn)
+        # SPNs name the host without the trailing $ (cifs/DC01), and a
+        # collected computer name may carry it (DC01$) - register every
+        # spelling or delegation edges silently never match. This miss hid
+        # svc.scanner's delegation path to DC01 on ctf.local (2026-11-09).
+        comp_by_name.setdefault(dn.split(",", 1)[0].split("=", 1)[-1].lower(), dn)
 
     def spn_host(spn):
         try:
@@ -315,19 +327,30 @@ def find_reachability(d):
     # services there. Neither right appears in any collected ACL, so without
     # these edges a member's chain wrongly dead-ends at the group (found on
     # ctf.local, 2026-11-09: svc.mssql in Backup Operators, zero ACL entries).
+    # Built-in SIDs, verified against Microsoft's list: 551 Backup
+    # Operators, 549 Server Operators, 550 Print Operators. (555 is
+    # Remote Desktop Users - NOT an operator group; an earlier version of
+    # this table keyed 555 and was corrected on 2026-11-09.)
     OPERATOR_EDGES = {
         551: ("BackupPrivilege",
               "Members of {g} can back up {dc} (SeBackupPrivilege), including the directory database and the SYSTEM hive.",
               "A backup of a Domain Controller contains every account's password data - Backup Operators are Tier Zero in practice, even though no ACL says so.",
               "Keep only accounts that actively perform backups in Backup Operators; treat its members as Domain Admin equivalents and monitor the group."),
-        555: ("ServiceControl",
+        549: ("ServiceControl",
               "Members of {g} can log on to {dc} and start or stop services on it.",
               "Controlling services on a Domain Controller can be turned into code execution on the DC, and control of a DC is control of the domain.",
               "Keep only accounts that actively administer DC services in Server Operators; treat its members as Tier Zero."),
+        550: ("PrintOperator",
+              "Members of {g} can log on to {dc} and manage printers and printer drivers on it.",
+              "Loading a printer driver on a Domain Controller is a known route to code execution on the DC, and control of a DC is control of the domain.",
+              "Keep Print Operators empty unless a documented print role needs it; treat its members as Tier Zero."),
     }
     _dc_dns = [dn for dn, c in comps.items() if c.get("uac", 0) & 0x2000]
     for gdn, g in groups.items():
-        _spec = OPERATOR_EDGES.get(rid(g.get("sid")))
+        # Built-in operator groups live in the S-1-5-32 namespace; a domain
+        # group can share the RID number (a domain Remote Desktop Users is
+        # also -555) and must NOT inherit these edges.
+        _spec = OPERATOR_EDGES.get(rid(g.get("sid"))) if str(g.get("sid", "")).startswith("S-1-5-32-") else None
         if not _spec:
             continue
         _kind, _t_tpl, _risk, _fix = _spec
@@ -335,6 +358,18 @@ def find_reachability(d):
             add(gdn, _dcdn, _kind,
                 _t_tpl.format(g=g["name"], dc=comps[_dcdn]["name"]),
                 _risk, _fix)
+
+    # --- 11) Local admin rights (AdminTo), when the data carries them ---
+    # SharpHound collects LocalAdmins per computer; Cerberus's own collector
+    # does not (yet), so this fires only when a computer dict has the field.
+    for dn, c in comps.items():
+        for sid in c.get("local_admins", []) or []:
+            src = sid_of.get(sid)
+            if src and src != dn:
+                add(src, dn, "AdminTo",
+                    f"{label(src)} is a local administrator on {c['name']}",
+                    "Local admin means full control of that machine and of any credentials in its memory. On a Domain Controller it is control of the domain itself.",
+                    "Remove local admin rights that are not needed; prefer LAPS-managed per-machine passwords and tiered admin workstations.")
 
     # --- Already privileged: reaches a target through membership alone ---
     rev_member = {}
@@ -372,7 +407,9 @@ def find_reachability(d):
         # expansion budget keeps dense graphs from exploding.
         if start not in dist:
             return []
-        max_depth = dist[start] + 2
+        # Slack of 3 (was 2): with several target classes, the nearest
+        # target can shadow a longer route to a stronger one.
+        max_depth = dist[start] + 3
         found = []
         budget = [20000]
 
@@ -382,7 +419,10 @@ def find_reachability(d):
             budget[0] -= 1
             if node in targets:
                 found.append(list(acc))
-                return
+                if node in tier0_targets:
+                    return
+                # Privileged-group target: the path is recorded, but keep
+                # walking - the same route may continue on to Tier Zero.
             if len(acc) >= max_depth:
                 return
             for (b, kind, t, r, f) in sorted(edges.get(node, []), key=lambda x: dist.get(x[0], 10 ** 9)):
@@ -420,6 +460,77 @@ def find_reachability(d):
             reaching.append((u["name"], paths[0]))
             all_paths[u["name"]] = paths
     return already, reaching, all_paths
+
+
+def privileged_group_dns(d):
+    """Groups that count as BloodHound-style high-value targets beyond
+    Tier Zero. A group qualifies when ANY of these holds:
+    - it is a built-in operator/admin group (S-1-5-32-544/548/549/550/
+      551 - the S-1-5-32 prefix matters: a domain group can share the
+      RID; 555 is Remote Desktop Users and is deliberately excluded);
+    - it is a local administrator on at least one computer (the practical
+      definition of an admin group - this is what marks Tier 1/2 Admins);
+    - it is Group Policy Creator Owners (domain RID 520 - its members
+      can create GPOs, a recognised privilege-escalation foothold);
+    - its name marks it as an admin group and it has enabled members.
+    (An earlier rule - "holds an adminCount=1 account" - was dropped: on
+    real data it marked Remote Desktop Users privileged just because one
+    protected account sat in it, hiding every longer real path.)
+    """
+    users_by_dn = {u.get("dn"): u for u in d.get("users", []) if u.get("dn")}
+    local_admin_sids = set()
+    for c in d.get("computers", []) or []:
+        local_admin_sids.update(c.get("local_admins", []) or [])
+    out = set()
+    for g in d.get("groups", []):
+        if not g.get("dn"):
+            continue
+        sid = str(g.get("sid", ""))
+        if rid(sid) in (512, 518, 519):
+            continue  # already Tier Zero
+        if sid.startswith("S-1-5-32-") and rid(sid) in (544, 548, 549, 550, 551):
+            out.add(g["dn"])
+            continue
+        if sid and sid in local_admin_sids:
+            out.add(g["dn"])
+            continue
+        if rid(sid) == 520:
+            out.add(g["dn"])
+            continue
+        members = g.get("members", []) or []
+        enabled_members = [users_by_dn[m] for m in members
+                           if m in users_by_dn and users_by_dn[m].get("enabled", True)]
+        if "admin" in str(g.get("name", "")).lower() and (enabled_members or members):
+            out.add(g["dn"])
+    return out
+
+
+def find_all_reachability(d):
+    """BloodHound-style widened reachability: Tier Zero paths PLUS paths
+    ending at a privileged group. Returns (already, reaching, all_paths)
+    in the same shape as find_reachability; a path's final step names its
+    target, so callers can tell a Domain Admin path from a group path.
+    Tier Zero results always win per account; group-ending paths from the
+    widened run are merged in for everyone else (and as extra routes for
+    accounts that have both)."""
+    already0, reaching0, paths0 = find_reachability(d)
+    pg = privileged_group_dns(d)
+    if not pg:
+        return already0, reaching0, paths0
+    already_w, _r, paths_w = find_reachability(d, extra_targets=pg)
+    merged = {name: list(ps) for name, ps in paths0.items()}
+    for name, ps in paths_w.items():
+        extra = [p for p in ps if p not in merged.get(name, [])]
+        if extra:
+            merged.setdefault(name, []).extend(extra)
+            merged[name].sort(key=len)
+            merged[name] = merged[name][:10]
+    already = list(already0)
+    for n in already_w:
+        if n not in already:
+            already.append(n)
+    reaching = [(name, ps[0]) for name, ps in merged.items()]
+    return already, reaching, merged
 
 
 if __name__ == "__main__":
