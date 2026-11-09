@@ -1902,9 +1902,54 @@ if reaching:
 else:
     explorer = '<div class="card"><p>No account outside the admin groups can reach Domain Admin through the permissions collected.</p></div>'
 
+# ---- Privileged-group paths: the BloodHound-style widened view ----
+# The DA numbers above stay exact; this separate panel shows accounts
+# whose best route ends at a privileged group (Tier 1/2 Admins, operator
+# groups, local-admin groups) instead of Domain Admin, plus accounts
+# that simply sit inside such a group. Nothing here is double-counted
+# into the Tier Zero figures.
+try:
+    from paths import find_all_reachability as _far
+    _ga, _gr, _gpaths = _far(_D)
+except Exception:
+    _ga, _gr, _gpaths = [], [], {}
+_gp_rows = []
+for _n, _ps in _gpaths.items():
+    if _n in all_paths:
+        continue  # has a DA path - already in the Explorer above
+    _best = min(_ps, key=len)
+    _chain = esc(_best[0][0])
+    for (_f, _k, _t, _x, _r, _fx) in _best:
+        _chain += ' -[' + esc(_k) + ']-&gt; ' + esc(_t)
+    _gp_rows.append((len(_best), -len(_ps), _n, _best[-1][2], _chain))
+_gp_rows.sort()
+_gp_members = [n for n in _ga if n not in already_priv]
+group_paths_html = ""
+if _gp_rows or _gp_members:
+    group_paths_html = ('<h3 class="subh">Paths to Privileged Groups (BloodHound-style)</h3>'
+                        '<div class="card"><p class="simnote">These accounts cannot reach Domain Admin directly, '
+                        'but they can reach a group that is privileged in its own right - a local-admin group, '
+                        'an operator group, or a Tier 1/2 admin group. BloodHound counts these as attack paths; '
+                        'so do we, listed separately so the Domain Admin figures above stay exact.</p>')
+    if _gp_members:
+        _shown = ", ".join(esc(n) for n in _gp_members[:25])
+        if len(_gp_members) > 25:
+            _shown += ' and ' + str(len(_gp_members) - 25) + ' more'
+        group_paths_html += ('<p><b>' + str(len(_gp_members)) +
+                             ' account(s) are members of a privileged group:</b> ' + _shown + '</p>')
+    if _gp_rows:
+        group_paths_html += ('<table><tr><th>Account</th><th>Reaches</th><th>Steps</th><th>Paths</th><th>Shortest route</th></tr>')
+        for (_ln, _np, _n, _tgt, _chain) in _gp_rows[:75]:
+            group_paths_html += ('<tr><td><b>' + esc(_n) + '</b></td><td>' + esc(_tgt) + '</td><td>' +
+                                 str(_ln) + '</td><td>' + str(-_np) + '</td><td>' + _chain + '</td></tr>')
+        group_paths_html += '</table>'
+        if len(_gp_rows) > 75:
+            group_paths_html += ('<p>Showing the 75 shortest of ' + str(len(_gp_rows)) + ' accounts.</p>')
+    group_paths_html += '</div>'
+
 tab2 = ('<h2 style="margin-top:6px">Privilege Paths</h2>' + tab2_kpis + cut_html + sim_html + comp_html +
         '<h3 class="subh">Tier Zero - already at Domain Admin level (' + str(len(already_priv)) + ')</h3>' + tierzero +
-        map_section + '<h3 class="subh">Path Explorer</h3>' + explorer)
+        map_section + '<h3 class="subh">Path Explorer</h3>' + explorer + group_paths_html)
 
 
 header = ('<div class="header"><div><h1>Active Directory Security Report</h1>'

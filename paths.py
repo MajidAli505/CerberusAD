@@ -371,6 +371,26 @@ def find_reachability(d, extra_targets=None):
                     "Local admin means full control of that machine and of any credentials in its memory. On a Domain Controller it is control of the domain itself.",
                     "Remove local admin rights that are not needed; prefer LAPS-managed per-machine passwords and tiered admin workstations.")
 
+    # --- 12) Live sessions and RDP access (when the data carries them) ---
+    # A session means the account's credentials are present on that
+    # machine; RDP membership means interactive logon. Chained the
+    # BloodHound way: principal -CanRDP-> machine -HasSession-> user.
+    for dn, c in comps.items():
+        for sid in c.get("sessions", []) or []:
+            usr = sid_of.get(sid)
+            if usr and usr != dn:
+                add(dn, usr, "HasSession",
+                    f"{label(usr)} has a session on {c['name']}",
+                    "A live session leaves the account's credentials in this machine's memory. Whoever controls the machine must be treated as able to act as the session's owner.",
+                    "Treat any machine where a privileged account has a session as Tier Zero itself; use dedicated admin workstations so privileged sessions never land on ordinary machines.")
+        for sid in c.get("rdp_users", []) or []:
+            src = sid_of.get(sid)
+            if src and src != dn:
+                add(src, dn, "CanRDP",
+                    f"{label(src)} can log on to {c['name']} over Remote Desktop",
+                    "RDP logon alone does not hand over the machine, but it puts the account one step from everything on it - including other users' live sessions.",
+                    "Remove Remote Desktop access that is not needed; never grant broad groups RDP access to servers.")
+
     # --- Already privileged: reaches a target through membership alone ---
     rev_member = {}
     for a, lst in edges.items():

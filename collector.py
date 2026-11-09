@@ -5,6 +5,8 @@ p = argparse.ArgumentParser()
 p.add_argument("--dc", required=True, help="IP address or name of the DC")
 p.add_argument("--user", required=True, help="e.g. DOMAIN\\user")
 p.add_argument("--password", required=True)
+p.add_argument("--skip-remote", action="store_true",
+               help="Skip per-machine RPC collection (local admins, RDP users, sessions)")
 args = p.parse_args()
 
 server = Server(args.dc, get_info=ALL)
@@ -335,7 +337,7 @@ else:
 computers = []
 for e in search_all(BASE, "(objectClass=computer)",
         ["sAMAccountName", "objectSid", "distinguishedName", "pwdLastSet", "msDS-AllowedToDelegateTo",
-         "operatingSystem", "description", "msDS-SupportedEncryptionTypes", "userAccountControl", "lastLogonTimestamp", "altSecurityIdentities"]):
+         "operatingSystem", "description", "msDS-SupportedEncryptionTypes", "userAccountControl", "lastLogonTimestamp", "altSecurityIdentities", "dNSHostName"]):
     a = e.get("attributes")
     if a is None:
         continue
@@ -353,8 +355,139 @@ for e in search_all(BASE, "(objectClass=computer)",
         "is_dc": has_flag(uac, 0x2000),
         "last_logon": str(filetime(a.get("lastLogonTimestamp"))),
         "alt_sec_identities": as_list(a.get("altSecurityIdentities")),
+        "host": first(a.get("dNSHostName")),
+        # Filled by the remote-collection phase below (empty when a
+        # machine cannot be reached - the fields always exist).
+        "local_admins": [],
+        "rdp_users": [],
+        "sessions": [],
     })
 print("Computers:", len(computers))
+
+
+# ---------- Remote collection: what LDAP cannot see ----------
+# Local admin membership, RDP membership and live sessions live on each
+# machine, not in the directory - SharpHound asks the machines directly
+# over RPC, and so do we (impacket). Best effort by design: a machine
+# that is off, firewalled or access-denied is skipped and counted,
+# never fatal, and its three fields simply stay empty.
+# One-time setup on the machine running this collector:
+#     pip install impacket
+_user_sid_by_name = {}
+for _u in users:
+    if _u.get("name") and _u.get("sid"):
+        _user_sid_by_name[str(_u["name"]).upper()] = _u["sid"]
+_domain_dns = ".".join(x.split("=")[1] for x in BASE.split(",") if x.upper().startswith("DC="))
+
+def _rpc_dce(host, pipe, uuid, cred):
+    from impacket.dcerpc.v5 import transport
+    rpc = transport.SMBTransport(host, filename=pipe, username=cred[0],
+                                 password=cred[1], domain=cred[2], remote_host=host)
+    dce = rpc.get_dce_rpc()
+    dce.set_timeout(6)
+    dce.connect()
+    dce.bind(uuid)
+    return dce
+
+def _alias_sids(host, cred, alias_rid):
+    # Members of a local group (alias) in the machine's Builtin domain:
+    # 544 = Administrators, 555 = Remote Desktop Users.
+    from impacket.dcerpc.v5 import samr
+    dce = _rpc_dce(host, r"\samr", samr.MSRPC_UUID_SAMR, cred)
+    try:
+        srv = samr.hSamrConnect(dce)["ServerHandle"]
+        dom = samr.hSamrLookupDomainInSamServer(dce, srv, "Builtin")["DomainId"]
+        dh = samr.hSamrOpenDomain(dce, serverHandle=srv, domainId=dom)["DomainHandle"]
+        ah = samr.hSamrOpenAlias(dce, dh, aliasId=alias_rid)["AliasHandle"]
+        resp = samr.hSamrGetMembersInAlias(dce, ah)
+        return sorted({m["SidPointer"].formatCanonical() for m in resp["Members"]["Sids"]})
+    finally:
+        try: dce.disconnect()
+        except Exception: pass
+
+def _session_sids(host, cred):
+    # Who is on this machine: SMB sessions (srvsvc) + logged-on users
+    # (wkssvc), mapped from usernames to directory SIDs.
+    from impacket.dcerpc.v5 import srvs, wkst
+    from impacket.dcerpc.v5.rpcrt import DCERPCException
+    names = set()
+    try:
+        dce = _rpc_dce(host, r"\srvsvc", srvs.MSRPC_UUID_SRVS, cred)
+        try:
+            try:
+                resp = srvs.hNetrSessionEnum(dce, None, None, 10)
+            except DCERPCException as e:
+                if "STATUS_MORE_ENTRIES" not in str(e): raise
+                resp = e.get_packet()
+            for ent in resp["InfoStruct"]["SessionInfo"]["Level10"]["Entries"]:
+                if ent["sesi10_username"]:
+                    names.add(str(ent["sesi10_username"]))
+        finally:
+            try: dce.disconnect()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        dce = _rpc_dce(host, r"\wkssvc", wkst.MSRPC_UUID_WKST, cred)
+        try:
+            try:
+                resp = wkst.hNetrWkstaUserEnum(dce, 1)
+            except DCERPCException as e:
+                if "STATUS_MORE_ENTRIES" not in str(e): raise
+                resp = e.get_packet()
+            for ent in resp["UserInfo"]["Level1"]["Entries"]:
+                if ent["wkui1_username"]:
+                    names.add(str(ent["wkui1_username"]))
+        finally:
+            try: dce.disconnect()
+            except Exception: pass
+    except Exception:
+        pass
+    out = set()
+    for n in names:
+        if not n or n.endswith("$") or n.upper() == "GUEST":
+            continue
+        s = _user_sid_by_name.get(n.upper())
+        if s:
+            out.add(s)
+    return sorted(out)
+
+if args.skip_remote:
+    print("Remote collection: skipped (--skip-remote)")
+else:
+    try:
+        import impacket  # noqa: F401
+        _have_impacket = True
+    except ImportError:
+        _have_impacket = False
+    if not _have_impacket:
+        print("Remote collection: impacket is not installed, so local admins,")
+        print("  RDP users and sessions were NOT collected. Install once with:")
+        print("      pip install impacket")
+        print("  then re-run this collector (or pass --skip-remote to silence).")
+    else:
+        _raw_user = args.user.replace("/", "\\")
+        if "\\" in _raw_user:
+            _cred_dom, _cred_user = _raw_user.split("\\", 1)
+        elif "@" in _raw_user:
+            _cred_user, _cred_dom = _raw_user.split("@", 1)
+        else:
+            _cred_user, _cred_dom = _raw_user, _domain_dns
+        _cred = (_cred_user, args.password, _cred_dom)
+        _answered = 0
+        for _c in computers:
+            _host = _c.get("host") or ((_c.get("name") or "").rstrip("$") + "." + _domain_dns)
+            if not _host:
+                continue
+            try:
+                _c["local_admins"] = _alias_sids(_host, _cred, 544)
+                _c["rdp_users"] = _alias_sids(_host, _cred, 555)
+                _c["sessions"] = _session_sids(_host, _cred)
+                _answered += 1
+            except Exception:
+                pass  # off / firewalled / access denied - fields stay empty
+        print(f"Remote collection: {_answered}/{len(computers)} machines answered "
+              "(local admins, RDP users, sessions)")
 
 
 
