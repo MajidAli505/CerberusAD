@@ -1350,9 +1350,16 @@ if _opt_rows:
                       '<p><b>Projected score if you work in this order:</b> ' + ' &#8594; '.join(_journey) + '</p>')
 
 AUTO_PS = {
+ "AUTH-01": lambda nm: ["Set-ADAccountControl -Identity '" + nm + "' -DoesNotRequirePreAuth $false -WhatIf"],
  "AUTH-03": lambda nm: ["Set-ADUser -Identity '" + nm + "' -PasswordNeverExpires $false -WhatIf"],
+ "AUTH-06": lambda nm: ["Set-ADUser -Identity '" + nm + "' -TrustedForDelegation $false -WhatIf"],
  "AUTH-07": lambda nm: ["Set-ADUser -Identity '" + nm + "' -ChangePasswordAtLogon $true -WhatIf"],
+ "AUTH-10": lambda nm: ["Set-ADAccountControl -Identity '" + nm + "' -PasswordNotRequired $false -WhatIf"],
+ "AUTH-11": lambda nm: ["Set-ADAccountControl -Identity '" + nm + "' -AllowReversiblePasswordEncryption $false -WhatIf"],
+ "AUTH-12": lambda nm: ["Set-ADAccountControl -Identity '" + nm + "' -UseDESKeyOnly $false -WhatIf"],
+ "AUTH-16": lambda nm: ["Set-ADComputer -Identity '" + nm + "' -TrustedForDelegation $false -WhatIf"],
  "AUTH-32": lambda nm: ["Set-ADUser -Identity '" + nm + "' -Clear Description -WhatIf"],
+ "PRIV-02": lambda nm: ["Disable-ADAccount -Identity '" + nm + "' -WhatIf"],
 }
 _dns = ".".join(p.replace("DC=", "") for p in _D["domain"].get("base_dn", "").split(",") if p.strip().upper().startswith("DC="))
 _ps = ["# CerberusAD remediation script - generated " + _dt.now().strftime("%d %B %Y"),
@@ -1385,6 +1392,9 @@ for r in fails:
         _cmds = ["Set-ADDefaultDomainPasswordPolicy -Identity '" + _dns + "' -MinPasswordLength 14 -WhatIf"]
     elif r["id"] == "POL-02" and _dns:
         _cmds = ["Set-ADDomain -Identity '" + _dns + "' -Replace @{'ms-DS-MachineAccountQuota'=0} -WhatIf"]
+    elif r["id"] == "DS-23" and _dns:
+        _cmds = ["# NOTE: enabling the AD Recycle Bin is permanent - it cannot be switched off afterwards.",
+                 "Enable-ADOptionalFeature -Identity 'Recycle Bin Feature' -Scope ForestOrConfigurationSet -Target '" + _dns + "' -WhatIf"]
     if _cmds:
         _ps += _cmds
     else:
