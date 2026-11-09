@@ -308,6 +308,34 @@ def find_reachability(d):
                 "Domain Controllers hold a full copy of the directory, including every account's password data. Control of a DC is control of the domain.",
                 "This is expected - Domain Controllers are Tier Zero by design and must be protected like the domain itself.")
 
+    # --- 10) Built-in operator groups: inherent privileges no ACL records ---
+    # Backup Operators hold SeBackupPrivilege on every DC: a backup of a DC
+    # includes the directory database and the SYSTEM hive - the domain's
+    # credential material. Server Operators can log on to DCs and control
+    # services there. Neither right appears in any collected ACL, so without
+    # these edges a member's chain wrongly dead-ends at the group (found on
+    # ctf.local, 2026-11-09: svc.mssql in Backup Operators, zero ACL entries).
+    OPERATOR_EDGES = {
+        551: ("BackupPrivilege",
+              "Members of {g} can back up {dc} (SeBackupPrivilege), including the directory database and the SYSTEM hive.",
+              "A backup of a Domain Controller contains every account's password data - Backup Operators are Tier Zero in practice, even though no ACL says so.",
+              "Keep only accounts that actively perform backups in Backup Operators; treat its members as Domain Admin equivalents and monitor the group."),
+        555: ("ServiceControl",
+              "Members of {g} can log on to {dc} and start or stop services on it.",
+              "Controlling services on a Domain Controller can be turned into code execution on the DC, and control of a DC is control of the domain.",
+              "Keep only accounts that actively administer DC services in Server Operators; treat its members as Tier Zero."),
+    }
+    _dc_dns = [dn for dn, c in comps.items() if c.get("uac", 0) & 0x2000]
+    for gdn, g in groups.items():
+        _spec = OPERATOR_EDGES.get(rid(g.get("sid")))
+        if not _spec:
+            continue
+        _kind, _t_tpl, _risk, _fix = _spec
+        for _dcdn in _dc_dns:
+            add(gdn, _dcdn, _kind,
+                _t_tpl.format(g=g["name"], dc=comps[_dcdn]["name"]),
+                _risk, _fix)
+
     # --- Already privileged: reaches a target through membership alone ---
     rev_member = {}
     for a, lst in edges.items():
