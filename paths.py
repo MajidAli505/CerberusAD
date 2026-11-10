@@ -34,7 +34,7 @@ def rid(sid):
         return -1
 
 
-def find_reachability(d, extra_targets=None):
+def find_reachability(d, extra_targets=None, path_limit=10):
     users  = {u["dn"]: u for u in d.get("users", [])  if u.get("dn")}
     groups = {g["dn"]: g for g in d.get("groups", []) if g.get("dn")}
     comps  = {c["dn"]: c for c in d.get("computers", []) if c.get("dn")}
@@ -475,7 +475,7 @@ def find_reachability(d, extra_targets=None):
         if dn in privileged_users:
             already.append(u["name"])
             continue
-        paths = build_paths(dn)
+        paths = build_paths(dn, limit=path_limit)
         if paths:
             reaching.append((u["name"], paths[0]))
             all_paths[u["name"]] = paths
@@ -525,26 +525,28 @@ def privileged_group_dns(d):
     return out
 
 
-def find_all_reachability(d):
+def find_all_reachability(d, path_limit=10):
     """BloodHound-style widened reachability: Tier Zero paths PLUS paths
     ending at a privileged group. Returns (already, reaching, all_paths)
     in the same shape as find_reachability; a path's final step names its
     target, so callers can tell a Domain Admin path from a group path.
     Tier Zero results always win per account; group-ending paths from the
     widened run are merged in for everyone else (and as extra routes for
-    accounts that have both)."""
-    already0, reaching0, paths0 = find_reachability(d)
+    accounts that have both). path_limit caps the routes kept per account
+    (default 10, the report behaviour; the dashboard package builder asks
+    for more so the graph can show the full fan-out of parallel routes)."""
+    already0, reaching0, paths0 = find_reachability(d, path_limit=path_limit)
     pg = privileged_group_dns(d)
     if not pg:
         return already0, reaching0, paths0
-    already_w, _r, paths_w = find_reachability(d, extra_targets=pg)
+    already_w, _r, paths_w = find_reachability(d, extra_targets=pg, path_limit=path_limit)
     merged = {name: list(ps) for name, ps in paths0.items()}
     for name, ps in paths_w.items():
         extra = [p for p in ps if p not in merged.get(name, [])]
         if extra:
             merged.setdefault(name, []).extend(extra)
             merged[name].sort(key=len)
-            merged[name] = merged[name][:10]
+            merged[name] = merged[name][:path_limit]
     already = list(already0)
     for n in already_w:
         if n not in already:

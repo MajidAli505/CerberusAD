@@ -44,7 +44,7 @@ from datetime import date
 SEVERITY_SCORE = {"Critical": 10, "High": 5, "Medium": 2, "Low": 1}
 ITEM_CAP = 50          # evidence items kept per finding in the package
 MAX_GROUP_REACHERS = 40  # cap for accounts that only reach privileged groups
-MAX_PATHS_PER_ACCOUNT = 5
+MAX_PATHS_PER_ACCOUNT = 60  # graph fan-out: keep every shortest route
 
 
 def bundle_dir():
@@ -100,7 +100,7 @@ def build_package(collected, findings, paths_mod):
         capped.append(entry)
 
     _already, tier0_reaching, _ap = paths_mod.find_reachability(collected)
-    _a2, _r2, all_paths = paths_mod.find_all_reachability(collected)
+    _a2, _r2, all_paths = paths_mod.find_all_reachability(collected, path_limit=MAX_PATHS_PER_ACCOUNT)
 
     # Display names of the privileged groups (a path that passes through one
     # of them also counts as a path ENDING there - BloodHound-style).
@@ -130,20 +130,85 @@ def build_package(collected, findings, paths_mod):
         rest = sorted((p for p in ps if p not in chosen), key=len)
         return sorted((chosen + rest)[:MAX_PATHS_PER_ACCOUNT], key=len)
 
+    def rich(ps):
+        """Every shortest route (the full fan-out, BloodHound-style), plus
+        the shortest route to each other target, capped for package size."""
+        ps = with_group_prefixes(ps)
+        if not ps:
+            return []
+        shortest_len = min(len(p) for p in ps)
+        chosen = [p for p in ps if len(p) == shortest_len]
+        for p in covered(ps):
+            if p not in chosen:
+                chosen.append(p)
+        return sorted(chosen[:MAX_PATHS_PER_ACCOUNT], key=len)
+
+    # BloodHound-style edge set: every distinct step of every account's
+    # shortest routes, stored ONCE. The dashboard rebuilds any account's
+    # full fan-out from these edges, so no account's graph is thinned by
+    # package size. (Per-account path strings below stay for the lists.)
+    edge_set = set()
+    target_names = set()
+    for _n, _ps in all_paths.items():
+        if not _ps:
+            continue
+        _min = min(len(p) for p in _ps)
+        for _p in _ps:
+            if len(_p) != _min:
+                continue
+            target_names.add("Domain Admin" if _p[-1][2].startswith("the domain") else _p[-1][2])
+            for _step in _p:
+                edge_set.add((_step[0], _step[1],
+                              "Domain Admin" if _step[2].startswith("the domain") else _step[2]))
+    pkg_edges = sorted([list(e) for e in edge_set])
+    pkg_targets = sorted(target_names)
+
     pkg_paths = {}
     da_names = {n for (n, _s) in tier0_reaching}
     for name in sorted(da_names):
-        pkg_paths[name] = [path_to_str(p) for p in covered(with_group_prefixes(all_paths.get(name, [])))]
-    group_only = sorted(n for n in all_paths if n not in da_names)
-    for name in group_only[:MAX_GROUP_REACHERS]:
-        pkg_paths[name] = [path_to_str(p) for p in covered(with_group_prefixes(all_paths[name]))]
-    if len(group_only) > MAX_GROUP_REACHERS:
-        print("Note: " + str(len(group_only)) + " accounts reach a privileged group; the package "
-              "lists the first " + str(MAX_GROUP_REACHERS) + " plus every account that reaches "
-              "Domain Admin. The full list is in the local report.")
+        pkg_paths[name] = [path_to_str(p) for p in rich(all_paths.get(name, []))]
+    # Group-only reachers: EVERY account is listed. Accounts that deserve
+    # the full fan-out ("rich"): named tier/service accounts, accounts that
+    # appear as a middle step in other accounts' routes (the fan's blades),
+    # and the first account of each letter (a spread sample). The rest get
+    # their shortest route to up to 2 targets - the chains are shared, so
+    # nothing structural is lost.
+    group_only = [n for n in all_paths if n not in da_names]
+
+    def is_persona(n):
+        u = n.upper()
+        return (u.startswith(("T0_", "T1_", "T2_", "SVC")) or "ADMIN" in u
+                or "HELPDESK" in u or "SQL" in u or "BACKUP" in u)
+
+    intermediates = set()
+    for _ps in all_paths.values():
+        for _p in _ps:
+            for _step in _p[1:-1]:
+                intermediates.add(_step[2])
+    first_by_letter = {}
+    for n in sorted(group_only):
+        first_by_letter.setdefault(n[0].upper(), n)
+    rich_names = {n for n in group_only if is_persona(n)}
+    rich_names |= intermediates & set(group_only)
+    rich_names |= set(first_by_letter.values())
+    for n in sorted(group_only):
+        if len(rich_names) >= 150:
+            break
+        rich_names.add(n)
+    for name in group_only:
+        sel = rich(all_paths[name]) if name in rich_names else covered(all_paths[name])[:2]
+        pkg_paths[name] = [path_to_str(p) for p in sel]
+    # Size guard: keep the package uploadable; degrade gracefully and say so.
+    for stage, rich_keep in ((1, 60), (2, 20), (3, 5)):
+        if len(json.dumps(pkg_paths)) <= 1800000:
+            break
+        for name in group_only:
+            pkg_paths[name] = pkg_paths[name][:rich_keep] if name in rich_names else pkg_paths[name][:1]
+        print("Note: very large domain - route lists trimmed (stage " + str(stage) + ") to keep the package uploadable.")
 
     return {"domain": domain_name, "date": date.today().isoformat(),
-            "risk_score": score, "findings": capped, "paths": pkg_paths}
+            "risk_score": score, "findings": capped, "paths": pkg_paths,
+            "edges": pkg_edges, "targets": pkg_targets}
 
 
 def main():
