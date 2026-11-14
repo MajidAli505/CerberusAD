@@ -53,8 +53,18 @@ def find_reachability(d, extra_targets=None, path_limit=10):
     def label(node):
         return name_of.get(node, node)
 
-    # Targets: Domain / Enterprise / Schema Admins + DOMAIN node
+    # Targets: Domain / Enterprise / Schema Admins + DOMAIN node, plus
+    # BUILTIN\Administrators (S-1-5-32-544). On a Domain Controller the
+    # Administrators group holds full local control of the DC itself, so
+    # reaching it is Tier Zero in practice; the S-1-5-32 prefix check
+    # matters - a domain group can share RID 544 without being the
+    # built-in group. Note: Administrators is a target for pathfinding,
+    # but its members are NOT "already privileged" (see the closure
+    # below) - a member is not a Domain Admin, it reaches Tier Zero
+    # through the DC, so it must still get paths.
     targets = {dn for dn, g in groups.items() if rid(g.get("sid")) in (512, 518, 519)}
+    targets |= {dn for dn, g in groups.items()
+                if str(g.get("sid", "")).startswith("S-1-5-32-") and rid(g.get("sid")) == 544}
     targets.add(DOMAIN)
     tier0_targets = set(targets)
     if extra_targets:
@@ -163,6 +173,8 @@ def find_reachability(d, extra_targets=None, path_limit=10):
     # --- 4) Replication rights (on the domain) ---
     rights = {}
     for ace in d.get("domain_acl", []):
+        if ace.get("flags", 0) & 0x08:   # INHERIT_ONLY: flows to child objects, grants nothing on the root itself
+            continue
         sid  = ace.get("sid")
         mask = ace.get("mask", 0)
         if mask & GENERIC_ALL:
@@ -266,7 +278,15 @@ def find_reachability(d, extra_targets=None, path_limit=10):
                     "Clear the sIDHistory attribute once the migration is finished, or remove the access it grants.")
 
     # --- 8) Write control over the domain root or AdminSDHolder ---
+    # INHERIT_ONLY ACEs are skipped in both loops: such an entry grants its
+    # holder nothing on the root/AdminSDHolder object itself - the right
+    # only flows down to child objects, where the per-object ACL sections
+    # above model it. Counting it here minted one-step "FullControl ->
+    # Domain Admin" edges for trustees (e.g. Protected Users, Replicator)
+    # whose real power is over child objects, not the domain root.
     for ace in d.get("domain_acl", []):
+        if ace.get("flags", 0) & 0x08:
+            continue
         mask = ace.get("mask", 0)
         if mask & (GENERIC_WRITE | WRITE_DACL | WRITE_OWNER):
             a = trustee_node(ace.get("sid"))
@@ -276,6 +296,8 @@ def find_reachability(d, extra_targets=None, path_limit=10):
                     "Write control over the domain root lets the holder change the domain's own security settings and seize further control from there.",
                     "Remove this access entry from the domain root - only the admin team should hold rights there.")
     for ace in d.get("adminsdholder_acl", []):
+        if ace.get("flags", 0) & 0x08:
+            continue
         mask = ace.get("mask", 0)
         if mask & DANGER:
             a = trustee_node(ace.get("sid"))
@@ -392,13 +414,24 @@ def find_reachability(d, extra_targets=None, path_limit=10):
                     "Remove Remote Desktop access that is not needed; never grant broad groups RDP access to servers.")
 
     # --- Already privileged: reaches a target through membership alone ---
+    # Administrators (S-1-5-32-544) is deliberately NOT a seed here, even
+    # though it is a target above: its membership is a ROUTE to Tier Zero
+    # (members control the DC), not Tier Zero identity itself. Seeding
+    # from it classified its members as "already privileged", which skips
+    # them in the loop below - so they got no paths at all, the exact
+    # opposite of the fix (found on thm.corp BloodHound data, 2026-11-14:
+    # MICHEL_ROBINSON / CHRISTINA_MCCORMICK / TREVOR_MELTON lost every
+    # path, including their AdminTo routes). Direct Domain / Enterprise /
+    # Schema Admins members stay "already" - they ARE Tier Zero.
+    admin544_dns = {dn for dn, g in groups.items()
+                    if str(g.get("sid", "")).startswith("S-1-5-32-") and rid(g.get("sid")) == 544}
     rev_member = {}
     for a, lst in edges.items():
         for (b, kind, _t, _r, _f) in lst:
             if kind == "MemberOf":
                 rev_member.setdefault(b, []).append(a)
-    member_only = set(targets)
-    dq = deque(targets)
+    member_only = set(targets) - admin544_dns
+    dq = deque(member_only)
     while dq:
         n = dq.popleft()
         for a in rev_member.get(n, []):
@@ -485,9 +518,10 @@ def find_reachability(d, extra_targets=None, path_limit=10):
 def privileged_group_dns(d):
     """Groups that count as BloodHound-style high-value targets beyond
     Tier Zero. A group qualifies when ANY of these holds:
-    - it is a built-in operator/admin group (S-1-5-32-544/548/549/550/
+    - it is a built-in operator/admin group (S-1-5-32-548/549/550/
       551 - the S-1-5-32 prefix matters: a domain group can share the
-      RID; 555 is Remote Desktop Users and is deliberately excluded);
+      RID; 555 is Remote Desktop Users and is deliberately excluded;
+      544 Administrators is Tier Zero now, not a widened target);
     - it is a local administrator on at least one computer (the practical
       definition of an admin group - this is what marks Tier 1/2 Admins);
     - it is Group Policy Creator Owners (domain RID 520 - its members
@@ -508,7 +542,7 @@ def privileged_group_dns(d):
         sid = str(g.get("sid", ""))
         if rid(sid) in (512, 518, 519):
             continue  # already Tier Zero
-        if sid.startswith("S-1-5-32-") and rid(sid) in (544, 548, 549, 550, 551):
+        if sid.startswith("S-1-5-32-") and rid(sid) in (548, 549, 550, 551):
             out.add(g["dn"])
             continue
         if sid and sid in local_admin_sids:

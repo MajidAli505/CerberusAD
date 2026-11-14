@@ -63,6 +63,8 @@ def replication_trustees(d):
     # Collect each trustee's replication rights from the domain root ACL
     rights = {}
     for ace in d.get("domain_acl", []):
+        if ace.get("flags", 0) & 0x08:   # INHERIT_ONLY: flows to child objects, grants nothing on the root itself
+            continue
         s = rights.setdefault(ace["sid"], set())
         if ace["mask"] & 0x10000000:   # GENERIC_ALL — all rights, including replication
             s.update([REPL_GET_CHANGES, REPL_GET_CHANGES_ALL])
@@ -326,6 +328,8 @@ def check_dcsync(d):
     legit = legit_acl_sids(d)
     rights = {}
     for ace in d.get("domain_acl", []):
+        if ace.get("flags", 0) & 0x08:   # INHERIT_ONLY: grants nothing on the domain root itself
+            continue
         s = rights.setdefault(ace["sid"], set())
         if ace["mask"] & 0x10000000:   # GENERIC_ALL — everything, including replication
             s.update([REPL_GET_CHANGES, REPL_GET_CHANGES_ALL])
@@ -341,6 +345,8 @@ def dangerous_trustees(d, acl_key):
     legit = legit_acl_sids(d)
     bad, seen = [], set()
     for ace in d.get(acl_key, []):
+        if ace.get("flags", 0) & 0x08:   # INHERIT_ONLY: the right flows to child objects; it is not a right on this object
+            continue
         if ace["mask"] & (0x10000000 | 0x00040000 | 0x00080000):  # GenericAll | WriteDacl | WriteOwner
             if ace["sid"] not in legit and ace["sid"] not in seen:
                 seen.add(ace["sid"])

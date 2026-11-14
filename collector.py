@@ -502,6 +502,11 @@ def get_sd(dn):
                          attributes=["nTSecurityDescriptor"],
                          controls=security_descriptor_control(sdflags=0x04))
         if ok and conn.entries:
+            # A base-scope search must return the object we asked for; verify
+            # the DN instead of trusting entries[0] blindly, so an ACL can
+            # never be attributed to the wrong object.
+            if str(conn.entries[0].entry_dn).lower() != dn.lower():
+                return None
             vals = conn.entries[0].entry_attributes_as_dict.get("nTSecurityDescriptor")
             if vals:
                 return vals[0]
@@ -529,6 +534,7 @@ def parse_acl(sd):
     out = []
     for _ in range(ace_count):
         ace_type = sd[pos]
+        ace_flags = sd[pos + 1]   # ACE flags byte: 0x08 = INHERIT_ONLY (grants nothing on this object, only flows to child objects), 0x10 = inherited
         ace_size = int.from_bytes(sd[pos + 2:pos + 4], "little")
         if ace_type in (0, 5):   # 0 = simple permission, 5 = permission carrying a specific right (extended right)
             mask = int.from_bytes(sd[pos + 4:pos + 8], "little")
@@ -543,7 +549,7 @@ def parse_acl(sd):
                 if flags & 2:
                     sid_off += 16
             out.append({"sid": parse_sid(sd, sid_off), "mask": mask,
-                        "object_types": obj_types})
+                        "object_types": obj_types, "flags": ace_flags})
         pos += ace_size
     return out
 
@@ -557,18 +563,21 @@ for g in gpos:
         gpo_acls[g["name"]] = parse_acl(get_sd(g["dn"]))
 print("GPO ACLs:", len(gpo_acls))
 
+# ACLs are collected for EVERY user and group, not just privileged ones:
+# attack paths run through ordinary objects (a helpdesk group holding
+# GenericAll on a normal user who can delegate to a DC is invisible if only
+# adminCount=1 objects carry ACL data). Each read is one base-scope search.
 user_acls = {}
 for u in users:
-    if u.get("admin_count") == 1 and u.get("dn"):
+    if u.get("dn"):
         user_acls[u["name"]] = parse_acl(get_sd(u["dn"]))
-print("Privileged user ACLs:", len(user_acls))
+print("User ACLs:", len(user_acls))
 
 group_acls = {}
 for g in groups:
-    rid = (g.get("sid") or "").rsplit("-", 1)[-1]
-    if rid in ("512", "518", "519", "548", "549", "550", "551") and g.get("dn"):
+    if g.get("dn"):
         group_acls[g["name"]] = parse_acl(get_sd(g["dn"]))
-print("Privileged group ACLs:", len(group_acls))
+print("Group ACLs:", len(group_acls))
 
 template_acls = {}
 for t in cert_templates:
